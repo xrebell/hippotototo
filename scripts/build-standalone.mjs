@@ -18,7 +18,9 @@ import ts from 'typescript';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SRC_DIR = join(ROOT, 'components', 'hippo-run');
-const OUT_FILE = join(ROOT, 'public', 'play.html');
+// `--out <path>` writes somewhere else (e.g. a scratch dir while several people test changes in parallel).
+const outArg = process.argv.indexOf('--out');
+const OUT_FILE = outArg > -1 && process.argv[outArg + 1] ? resolve(process.argv[outArg + 1]) : join(ROOT, 'public', 'play.html');
 const MAX_BYTES = 400 * 1024;
 
 function fail(msg) {
@@ -131,11 +133,11 @@ for (const re of forbidden) {
   }
 }
 const bytes = Buffer.byteLength(html, 'utf8');
-if (bytes > MAX_BYTES) fail(`public/play.html is ${bytes} bytes (> ${MAX_BYTES})`);
+if (bytes > MAX_BYTES) fail(`${OUT_FILE} is ${bytes} bytes (> ${MAX_BYTES})`);
 
 writeFileSync(OUT_FILE, html);
 console.log(
-  `[build-standalone] wrote public/play.html (${(bytes / 1024).toFixed(1)} KB, ${modules.length} modules: ${modules
+  `[build-standalone] wrote ${OUT_FILE.replace(ROOT + "/", "")} (${(bytes / 1024).toFixed(1)} KB, ${modules.length} modules: ${modules
     .map((m) => m.name)
     .join(', ')})`,
 );
