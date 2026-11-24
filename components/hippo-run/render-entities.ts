@@ -1543,4 +1543,5 @@ const titleDrum: Entity = {
   nearMin: 1e9,
   nearDone: false,
   template: '',
+  lane: false,
 };

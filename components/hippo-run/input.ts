@@ -25,7 +25,12 @@
  *    overwritten. next() copies into one pooled record (valid until the next call).
  *  - Last-device tracking ('keyboard' | 'mouse' | 'touch') for "TAP" vs "SPACE" prompts.
  *  - TWO_ZONE_TOUCH (config): left 40% of the canvas = 'slam', right 60% = 'actionDown' (ships false).
- *  - Keys with Ctrl / Meta / Alt are ignored so browser shortcuts keep working.
+ *  - Keys with Ctrl / Meta / Alt are ignored so browser shortcuts keep working. Keydowns aimed at a
+ *    focused link / button / form field / contenteditable (not the canvas or body) are left to that
+ *    element (Enter follows the link); keyups still clear held keys but skip preventDefault.
+ *  - pointerdown calls window.focus() and blurs a focused page control, so a click on the canvas
+ *    takes the keyboard as a normal click would (preventDefault on pointerdown otherwise keeps focus
+ *    on the host page of an iframe, or on a previously focused link).
  *  - The canvas gets touch-action / user-select / -webkit-touch-callout: none while mounted (the
  *    page CSS sets them too); previous inline values are restored by destroy().
  *  - Hot path: handlers allocate nothing except the browser's own event objects.
@@ -244,9 +249,20 @@ export function createInput(canvas: HTMLCanvasElement, hooks: InputHooks): Input
   }
 
   /* ---------------- keyboard ---------------- */
+  /** A key event aimed at an interactive page element other than the game canvas. */
+  function isControlTarget(target: EventTarget | null): boolean {
+    const t = target as Element | null;
+    if (!t || t === document.body || t === canvas) return false;
+    if (typeof t.closest !== 'function') return false;
+    return t.closest('a,button,input,select,textarea,[contenteditable]') !== null;
+  }
+
   function onKeyDown(e: KeyboardEvent): void {
     if (destroyed) return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
+    // Keys aimed at a focused page control (a link, button, field) belong to that control: Enter
+    // follows the link, Space activates the button. No preventDefault, no game event.
+    if (isControlTarget(e.target)) return;
     const code = e.code || '';
     const key = e.key || '';
     if (isScrollKey(code, key)) e.preventDefault();
@@ -283,8 +299,9 @@ export function createInput(canvas: HTMLCanvasElement, hooks: InputHooks): Input
     if (destroyed) return;
     const code = e.code || '';
     const key = e.key || '';
-    if (isScrollKey(code, key)) e.preventDefault();
-    // Releases are honoured even with modifiers held (Space down, Ctrl, Space up).
+    if (isScrollKey(code, key) && !isControlTarget(e.target)) e.preventDefault();
+    // Releases are honoured even with modifiers held (Space down, Ctrl, Space up), and on any
+    // target (focus may have moved to a link while the key was down): held keys always clear.
     if (!removeKey(code !== '' ? code : key)) return;
     if (!anyHeld()) push('actionUp', 'keyboard', null, 0, 0);
   }
@@ -294,6 +311,16 @@ export function createInput(canvas: HTMLCanvasElement, hooks: InputHooks): Input
     if (destroyed) return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     if (e.cancelable) e.preventDefault();
+    // preventDefault on pointerdown also suppresses the focus change, so inside an iframe the
+    // keyboard would stay with the host page, and a focused link would keep Space / Enter (see
+    // isControlTarget): take focus explicitly, as a normal click would.
+    try {
+      window.focus();
+      const ae = document.activeElement as HTMLElement | null;
+      if (ae && ae !== document.body && ae !== canvas && typeof ae.blur === 'function') ae.blur();
+    } catch (_e) {
+      /* focus is best effort (sandboxed frames) */
+    }
     gesture();
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;

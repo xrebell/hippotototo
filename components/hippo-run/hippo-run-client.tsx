@@ -11,7 +11,30 @@ import { useEffect, useRef, useState } from 'react';
 import { createGame } from './index';
 import type { GameMode } from './types';
 
+/**
+ * The site header (rendered by app/layout.tsx, which the game must not edit) sits underneath the
+ * fullscreen game layer. Make it inert + hidden from assistive tech while /play is mounted so its
+ * invisible links never take keyboard focus or screen-reader attention. Returns the restore
+ * function (puts back whatever values were there before, so StrictMode mount -> cleanup -> mount
+ * and client navigation away from /play leave the header exactly as it was).
+ */
+function hideSiteHeader(gameRoot: HTMLElement | null): () => void {
+  const header = Array.from(document.querySelectorAll<HTMLElement>('body > header, header')).find((h) => !gameRoot || !gameRoot.contains(h));
+  if (!header) return () => {};
+  const prevInert = header.getAttribute('inert');
+  const prevAriaHidden = header.getAttribute('aria-hidden');
+  header.setAttribute('inert', '');
+  header.setAttribute('aria-hidden', 'true');
+  return () => {
+    if (prevInert === null) header.removeAttribute('inert');
+    else header.setAttribute('inert', prevInert);
+    if (prevAriaHidden === null) header.removeAttribute('aria-hidden');
+    else header.setAttribute('aria-hidden', prevAriaHidden);
+  };
+}
+
 export default function HippoRunClient() {
+  const rootRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [mode, setMode] = useState<GameMode>('title');
 
@@ -26,10 +49,12 @@ export default function HippoRunClient() {
     root.style.overflow = 'hidden';
     body.style.overflow = 'hidden';
     root.style.overscrollBehavior = 'none';
+    const restoreHeader = hideSiteHeader(rootRef.current);
 
     const handle = createGame(canvas, { onStateChange: setMode });
     return () => {
       handle.destroy();
+      restoreHeader();
       root.style.overflow = prevRootOverflow;
       body.style.overflow = prevBodyOverflow;
       root.style.overscrollBehavior = prevOverscroll;
@@ -39,7 +64,7 @@ export default function HippoRunClient() {
   const showChrome = mode === 'title' || mode === 'paused' || mode === 'gameover';
 
   return (
-    <div className="fixed inset-0 z-50 bg-[#0B0B1E]" style={{ height: '100dvh' }}>
+    <div ref={rootRef} className="fixed inset-0 z-50 bg-[#0B0B1E]" style={{ height: '100dvh' }}>
       <canvas
         ref={canvasRef}
         className="block h-full w-full touch-none select-none"

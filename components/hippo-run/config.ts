@@ -64,7 +64,8 @@ export const PHYS = {
   gravityDown: 3500,
   terminalVy: 1500,
   jumpVy: -900,
-  jumpCutVy: -360,
+  /** Release cut: vy = max(vy, this). -420 gives a ~83 u tap hop (suite band 60-90 u). */
+  jumpCutVy: -420,
   /**
    * Minimum rise time before a release may cut the jump (s). A tap delivered as press+release in
    * the same step still gives the spec's ~74 u "tap" hop (spec: tap ~60 ms). Gameplay may tune.
@@ -74,7 +75,10 @@ export const PHYS = {
   jumpBuffer: 0.13,
   /** Smart buffer: press while falling with predicted time-to-ground <= this -> buffered jump. */
   smartBuffer: 0.11,
-  slamLockout: 0.12,
+  /** Press ignored this long after takeoff/bounce (protects a nervous second tap). */
+  slamLockout: 0.18,
+  /** ...and this long after a BOING launch (kills the slam -> boing mash loop). */
+  slamLockoutAfterBoing: 0.35,
   slamHang: 0.05,
   slamVy: 1500,
   boingVy: -1120,
@@ -107,6 +111,9 @@ export const HITBOX = {
   insetWFrac: 0.15,
   /** ... and this many u off the top. */
   insetTop: 8,
+  /** Thorn bush only: wider tap window (hitbox ~30.8 x 22 u). Use geom insetWFracFor/insetTopFor. */
+  bushInsetWFrac: 0.3,
+  bushInsetTop: 12,
 };
 
 /** v(t) = start + gain * (1 - exp(-t / tau)). */
@@ -202,8 +209,11 @@ export const GOLDEN = {
 export const PICKUP = {
   /** Soap bubble diameter (u). */
   size: 40,
-  /** Bubble centre altitude above ground (u) — any hop collects. */
-  alt: 70,
+  /**
+   * Bubble centre altitude above ground (u). Bottom (incl. 4 u bob) >= 68 u, above the standing
+   * pickup-box top (64 u), so a bubble needs a hop: a tap hop (apex >= 74 u) collects it.
+   */
+  alt: 92,
 };
 
 export const BEST_FLAG = {
@@ -253,15 +263,22 @@ export const SCORE = {
 
 export const GROOVE = {
   max: 100,
-  mango: 1.2,
-  drum: 7,
+  /**
+   * Tuned with drum (plan G3): mango 0.4 + drum 5 put a bot that jumps onto every ground drum at a
+   * median first fever of ~43 s (1.3 fevers/min) and plain autopilot at ~113 s (16 seeds x 120 s).
+   */
+  mango: 0.4,
+  drum: 5,
   boom: 10,
   stomp: 8,
-  nearMiss: 5,
+  nearMiss: 8,
   melon: 4,
-  boing: 4,
+  /** 0: boings score (SCORE.boing) but never feed the meter (no slam -> boing mash fever). */
+  boing: 0,
   golden: 15,
-  /** Decay per second, only while grounded; frozen during TOTOTO TIME. */
+  /** A lethal hazard (bush/mound/log/hornbill) passed unhit, or a pit cleared by landing beyond it. */
+  hazardClear: 2,
+  /** Decay per second while grounded or while airborne with no chain; frozen during TOTOTO TIME. */
   decayPerS: 1.5,
   /** HUD flashes above this. */
   flashAbove: 85,
@@ -274,6 +291,8 @@ export const FEVER = {
   /** On exit, hazards within this many u ahead poof away. */
   clearAhead: 500,
   exitInvuln: 1.0,
+  /** Natural fills (addGroove) cannot start TOTOTO TIME before this run time (s). */
+  notBefore: 15,
 };
 
 export const NEAR_MISS = {
@@ -290,10 +309,13 @@ export const NEAR_MISS = {
 export const POWERUP = {
   /** Never within this many seconds (travel time) of a hazard. */
   hazardClearS: 0.8,
-  /** First Mud Coat guaranteed in the first breather after this run time (s). */
+  /** First Mud Coat guaranteed in the first breather after this run time (s)... */
   shieldFirstAt: 12,
+  /** ...which is forced after this many hazard chunks once due, or at this run time at the latest. */
+  shieldFirstChunks: 3,
+  shieldFirstLateAt: 20,
   /** Afterwards about one per this many s while none is held. */
-  shieldEvery: 35,
+  shieldEvery: 60,
   shieldInvuln: 1.0,
   magnetDur: 8,
   magnetRadius: 220,
@@ -309,9 +331,9 @@ export const DEATH = {
   slowDur: 0.5,
   slowScale: 0.25,
   /** Summary card appears this long (real s) after the hit. */
-  cardAt: 0.9,
+  cardAt: 0.65,
   /** Input accepted this long (real s) after the card appears. */
-  inputLockout: 0.5,
+  inputLockout: 0.35,
   /** Music low-pass target (Hz). */
   musicFilterHz: 300,
 };
@@ -349,6 +371,7 @@ export const TIER_KEYS: ReadonlyArray<{ m: number; w: ReadonlyArray<number> }> =
   { m: 120, w: [70, 30, 0] },
   { m: 500, w: [30, 50, 20] },
   { m: 1000, w: [10, 40, 50] },
+  { m: 1600, w: [0, 30, 70] },
 ];
 
 /** Template ids by tier (§8.3). Weight 1 each unless TEMPLATE_WEIGHT says otherwise. */
@@ -386,18 +409,34 @@ export const OPENING = {
 };
 
 export const TUTORIAL = {
-  /** Teaching freeze: if no jump has started by this long before contact... */
-  freezeLead: 0.45,
+  /**
+   * Teaching freeze: if no jump has started by this long before contact (time to the bush hitbox)...
+   * Eased in, the hero stops at ~0.24 s (~0.16 s after freezeMax): always inside the full-jump
+   * clear window, and the first-run jump over this bush is never cut (assisted jump, game.ts).
+   */
+  freezeLead: 0.3,
   /** ...timeScale eases to this until ACTION (max freezeMax s)... */
-  freezeScale: 0.15,
+  freezeScale: 0.02,
   freezeMax: 4,
-  freezeEaseIn: 0.2,
+  freezeEaseIn: 0.12,
   /** ...then eases back over this long. */
   freezeEaseOut: 0.3,
   slamPromptAt: 9,
   boingPromptAt: 14,
-  /** Prompts stop after this run time (s). */
-  promptsEnd: 20,
+  /** First-run prompts stop after this run time (s). */
+  promptsEnd: 45,
+  /** Lesson slow-mo (SLAM / BOING prompts): timeScale while the lesson timer runs (real s). */
+  lessonScale: 0.25,
+  slamSlowMax: 1.0,
+  boingSlowMax: 0.6,
+  /**
+   * First-run assisted jump: a ground jump pressed within this long (s) of touching the lesson bush
+   * is never cut, so any tap clears it (sim state only; also in reduced motion, where there is no freeze).
+   */
+  assistS: 0.4,
+  /** HOLD prompt over the first mound on runs 1..holdRuns; mound death caption on runs 1..holdCaptionRuns. */
+  holdRuns: 3,
+  holdCaptionRuns: 5,
 };
 
 /* ================================================================== */
@@ -671,7 +710,9 @@ export const HITSTOP = {
   slam: 0.06,
   boom: 0.05,
   stomp: 0.04,
-  smash: 0.03,
+  smash: 0.04,
+  /** TOTOTO TIME entry beat. */
+  fever: 0.18,
   shield: 0.08,
   death: 0.12,
   reducedMotionCap: 0.04,
@@ -689,6 +730,7 @@ export const SHAKE = {
   shield: 0.5,
   death: 0.7,
   smash: 0.15,
+  fever: 0.5,
 };
 
 export const FX = {
@@ -836,8 +878,8 @@ export const UI = {
 export const UI_TEXT = {
   logo: 'HIPPO TOTOTO',
   subtitle: 'Stomp the Beat',
-  howTo1: 'TAP: jump',
-  howTo2: 'TAP in the air: SLAM · TAP on landing: BOING',
+  howTo1: 'TAP: jump · HOLD: higher',
+  howTo2: 'TAP in the air: SLAM · SLAM, then TAP: BOING',
   start: 'Tap or press Space',
   paused: 'PAUSED',
   retry: 'Tap / Space to retry',
@@ -845,10 +887,15 @@ export const UI_TEXT = {
   portraitHint: 'Rotate for a wider view',
   tutTap: 'TAP',
   tutSpace: 'SPACE',
-  tutSlam: 'TAP AGAIN IN THE AIR = SLAM',
-  tutSlamKey: 'SPACE AGAIN IN THE AIR = SLAM',
-  tutBoing: 'TAP AS YOU LAND = BOING!',
-  tutBoingKey: 'SPACE AS YOU LAND = BOING!',
+  tutSlam: 'TAP AGAIN NOW = SLAM',
+  tutSlamKey: 'SPACE AGAIN NOW = SLAM',
+  tutBoing: 'TAP NOW = BOING!',
+  tutBoingKey: 'SPACE NOW = BOING!',
+  tutHold: 'HOLD = HIGHER',
+  tutHoldKey: 'HOLD SPACE = HIGHER',
+  tutDrum: 'JUMP ON THE DRUM',
+  /** Game-over caption after a mound death on the first runs. */
+  holdCaption: 'Hold longer to jump higher.',
   fever: 'TOTOTO TIME!',
   close: 'CLOSE!',
   record: '+NEW RECORD',
@@ -916,6 +963,8 @@ export const AUTOPILOT = {
   leadS: 0.3,
   /** Pits: jump at the lip minus this (u). */
   pitLipU: 12,
+  /** Tap-hop for a power-up bubble whose centre is this many s (x speed) ahead (+/- 0.02 s). */
+  bubbleLeadS: 0.2,
 };
 
 /** Sentinel for Entity.hitT / HeroState.postSlamT "never". */

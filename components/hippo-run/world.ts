@@ -11,10 +11,13 @@
  * 10 u each side), feet at/above top + 14 on the previous step and at/below top now. Moving
  * stompables additionally accept "feet above the target's vertical centre with vy > 0" on contact.
  *
- * Determinism: only sim data is read (no clocks, no Math.random). The log edge warning and the
- * recycling line are the only view-dependent bits, and neither changes the course.
+ * Determinism: only sim data is read (no clocks, no Math.random). View-dependent bits: the log edge
+ * warning, the recycling line, and where the TOTOTO TIME smash lane starts (just past the right
+ * screen edge, so nothing pops in on screen). None of them changes the course or survival; the lane
+ * can change the fever's smash/mango score on different screen widths.
  */
 import {
+  BUSH,
   CHAIN_HUES,
   DT,
   FX,
@@ -46,7 +49,7 @@ import {
 } from './config';
 import type { DeathCause, Entity, EntityKind, GameState, Services } from './types';
 import { boxGap, entityHitbox, heroHurtbox, heroPickupBox, overlaps } from './geom';
-import { drumPoints, hueIndex, phaseAt, speedAt } from './state';
+import { drumPoints, hueIndex, multiplierFor, phaseAt, speedAt } from './state';
 import type { SimCtx } from './world-sim';
 import {
   addGroove,
@@ -59,11 +62,12 @@ import {
   haptic,
   isLiveHazard,
   kill,
+  poofHazard,
   resetSimCtx,
   setChain,
   spawnEntity,
 } from './world-sim';
-import { BODY_OFFSET, heroPress, launchHero, nextVy } from './hero';
+import { BODY_OFFSET, heroPress, heroRelease, launchHero, nextVy } from './hero';
 import type { CourseGen } from './world-gen';
 
 export { spawnEntity } from './world-sim';
@@ -345,9 +349,16 @@ function bounceOn(state: GameState, sv: Services, sim: SimCtx, e: Entity): void 
   if (h.whip < (slam ? 1 : 0.6)) h.whip = slam ? 1 : 0.6;
   e.hitT = 0;
   const cx = e.x + e.w / 2;
+  const prev = r.chain;
   setChain(state, r.chain + (slam ? 2 : 1));
   const c = r.chain;
   const hue = hueIndex(c);
+  // Multiplier milestones (x3 at chain 5, x5 MAX at chain 8), once each per airtime.
+  if ((prev < 5 && c >= 5) || (prev < 8 && c >= 8)) {
+    const m = multiplierFor(c);
+    sv.fx.ring('boing', h.x, h.y - 30, -1);
+    sv.fx.popup(h.x, h.y - 150, m >= 5 ? 'x5 MAX!' : m === 4 ? 'x4!' : 'x3!', CHAIN_HUES[4], 'lg');
+  }
   if (isDrum) {
     e.hue = hue;
     const pts = award(state, drumPoints(c), true);
@@ -625,8 +636,12 @@ export function collideWorld(state: GameState, sv: Services, sim: SimCtx, dt: nu
         const gap = boxGap(hurt, hb);
         if (gap < e.nearMin) e.nearMin = gap;
       } else if (e.nearMin < 1e8 && hb.x + hb.w <= nx0) {
+        // Passed behind the hero unhit: a little groove for every cleared hazard (+ near miss).
         e.nearDone = true;
-        if (!state.fever.active && e.nearMin <= NEAR_MISS.clearance) nearMiss(state, sv, sim);
+        if (!state.fever.active) {
+          addGroove(state, GROOVE.hazardClear);
+          if (e.nearMin <= NEAR_MISS.clearance) nearMiss(state, sv, sim);
+        }
       }
     }
   }
@@ -713,6 +728,8 @@ function hornbillBlocks(state: GameState, sim: SimCtx): boolean {
 /**
  * Jump (full hold) when the next ground hazard's leading edge is <= 0.30 s away (closing speed for
  * logs), or at a pit's lip minus 12 u. Never while a hornbill would meet the arc. Ground only.
+ * During TOTOTO TIME it runs through (smashes) everything. A tap hop collects a power-up bubble
+ * whose centre is ~0.20 s ahead when nothing lethal lies within 1.0 s.
  */
 export function autopilotStep(state: GameState, sv: Services, sim: SimCtx): void {
   const h = state.hero;
@@ -720,22 +737,102 @@ export function autopilotStep(state: GameState, sv: Services, sim: SimCtx): void
   const v = state.run.speed;
   const ents = state.entities;
   const front = h.x + HERO.hurtW / 2;
+  const fever = state.fever.active;
   let need = false;
-  for (let i = 0; i < ents.length && !need; i++) {
+  let danger = false;
+  let bubble = false;
+  for (let i = 0; i < ents.length; i++) {
     const e = ents[i];
     if (!e.active) continue;
-    if (e.kind === 'pit') {
-      if (!state.fever.active && h.x >= e.x + PIT.lipInset - AUTOPILOT.pitLipU && h.x < e.x + PIT.lipInset) need = true;
+    if (e.kind === 'pickupShield' || e.kind === 'pickupMagnet') {
+      const d = e.x + e.w / 2 - h.x;
+      if (e.flag === 'none' && d >= (AUTOPILOT.bubbleLeadS - 0.02) * v && d <= (AUTOPILOT.bubbleLeadS + 0.02) * v) bubble = true;
       continue;
     }
-    if (e.kind !== 'bush' && e.kind !== 'mound' && e.kind !== 'log') continue;
+    if (e.kind === 'pit') {
+      if (e.x + e.w > h.x && e.x - front < v) danger = true;
+      if (!fever && h.x >= e.x + PIT.lipInset - AUTOPILOT.pitLipU && h.x < e.x + PIT.lipInset) need = true;
+      continue;
+    }
     if (!isLiveHazard(e)) continue;
     const hb = entityHitbox(e, sim.hit);
     if (hb.x + hb.w < h.x - HERO.hurtW / 2) continue;
     const gap = hb.x - front;
     const closing = v - e.vx;
+    if (gap / closing <= 1) danger = true;
+    if (fever || (e.kind !== 'bush' && e.kind !== 'mound' && e.kind !== 'log')) continue;
     if (gap / closing <= AUTOPILOT.leadS) need = true;
   }
-  if (need && !hornbillBlocks(state, sim)) heroPress(state, sv, sim);
+  if (need) {
+    if (!hornbillBlocks(state, sim)) heroPress(state, sv, sim);
+    return;
+  }
+  if (bubble && !danger) {
+    heroPress(state, sv, sim);
+    heroRelease(state, sim);
+  }
 }
 
+/* ------------------------------------------------------------------ */
+/* TOTOTO TIME smash lane                                              */
+/* ------------------------------------------------------------------ */
+
+/** True when an active pit, drum, hazard, melon or bubble overlaps [a, b]. */
+function laneBlocked(state: GameState, a: number, b: number): boolean {
+  const ents = state.entities;
+  for (let i = 0; i < ents.length; i++) {
+    const e = ents[i];
+    if (!e.active || e.x >= b || e.x + e.w <= a) continue;
+    if (e.hazard || e.kind === 'pit' || e.kind === 'drum' || e.kind === 'kiteDrum' || e.kind === 'melon') return true;
+    if (e.kind === 'pickupShield' || e.kind === 'pickupMagnet') return true;
+  }
+  return false;
+}
+
+/**
+ * Fever start: a lane of thorn bushes to smash (every 0.45 s of travel from just beyond the right
+ * screen edge, or 0.9 s ahead, up to 4.8 s ahead), with 3 mangoes between consecutive bushes. Slots
+ * near existing course content are skipped; nothing spawns inside the visible view.
+ */
+export function spawnFeverLane(state: GameState, sv: Services, _sim: SimCtx): void {
+  const h = state.hero;
+  const v = state.run.speed;
+  const x0 = Math.max(state.cam.x + state.view.viewW + 60, h.x + v * 0.9);
+  const end = h.x + v * 4.8;
+  let prev = -1;
+  for (let k = 0; k < 10; k++) {
+    const x = x0 + k * 0.45 * v;
+    if (x > end) break;
+    const e = laneBlocked(state, x - 0.2 * v, x + 0.2 * v) ? null : spawnEntity(state, sv, 'bush', x);
+    if (e === null) {
+      prev = -1;
+      continue;
+    }
+    e.lane = true;
+    if (prev >= 0) {
+      const gap = x - (prev + BUSH.w);
+      for (let j = 1; j <= 3; j++) {
+        const m = spawnEntity(state, sv, 'mango', prev + BUSH.w + (gap * j) / 4 - MANGO.size / 2);
+        if (m === null) break;
+        m.lane = true;
+        m.optional = true;
+      }
+    }
+    prev = x;
+  }
+}
+
+/** Fever end: poof every lane bush and drop every lane mango still ahead of the hero. */
+export function clearFeverLane(state: GameState, sv: Services, sim: SimCtx): void {
+  const x = state.hero.x - 50;
+  const ents = state.entities;
+  for (let i = 0; i < ents.length; i++) {
+    const e = ents[i];
+    if (e.active && e.lane && e.x > x && isLiveHazard(e)) poofHazard(sv, e);
+  }
+  const ms = state.mangoes;
+  for (let i = 0; i < ms.length; i++) {
+    const m = ms[i];
+    if (m.active && m.lane && m.x > x) freeMango(state, sim, i);
+  }
+}

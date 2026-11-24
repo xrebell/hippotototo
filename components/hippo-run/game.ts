@@ -24,12 +24,15 @@
  *                6. scoring      -> scoreStep (distance points, multiplier, groove decay, fever
  *                                    trigger, goals)
  *                7. timers       -> timerStep (fever countdown/exit, tutorial prompts + freeze)
- *            then pacing(realDt): timeScale from death slow-mo / near-miss blip / teaching
- *            freeze (REAL time, never changes the sim outcome), death card timing.
- *       c. real-time UI timers (banner.t, toast.t, tutorial.promptT)
+ *            then pacing(realDt): timeScale from death slow-mo / near-miss blip / lesson slow-mo
+ *            (0.25x) / teaching freeze (0.02x) (REAL time; pacing never changes the sim outcome),
+ *            death card timing. The first-run assisted jump over the lesson bush (tutorialStep) is
+ *            a deliberate first-run exception to that rule; it is driven only by sim state
+ *            (press + jump + distance to the bush), so determinism holds.
+ *       c. real-time UI timers (banner.t, toast.t, tutorial.promptT, fever.introT)
  *       d. fx.update(realDt)  — REAL dt, so particles/shake run during hit-stop (skipped when paused)
  *    2. audio.update(state, realDt)                     (not during advance())
- *    3. renderer.draw(state, alpha)                     alpha = accumulator / DT
+ *    3. renderer.draw(state, alpha)                     alpha = min(1, accumulator / DT)
  *    4. ui.update(state, realDt); ui.draw(ctx, state)
  *    5. adaptive quality check (2 s average > 20 ms -> DPR 1.5 + fx.setLowQuality, once)
  *
@@ -57,7 +60,9 @@ import {
   NEAR_MISS,
   PAL,
   PERF,
+  PHYS,
   SCORE,
+  SHAKE,
   TITLE,
   TUTORIAL,
   UI,
@@ -75,6 +80,7 @@ import type {
   InputEvent,
   PauseReason,
   Services,
+  Entity,
   TutorialPrompt,
 } from './types';
 import { cosmeticSeed, createRng, parseSeedParam, timeSeed } from './rng';
@@ -86,9 +92,9 @@ import { createFx } from './fx';
 import { createRenderer } from './render';
 import { createUI } from './ui';
 import { computeHeroTimings, heroOnInput, heroRelease, stepDeadHero, stepHero, stepTitleHero } from './hero';
-import { autopilotStep, collideWorld, resetWorld, spawnGallery, stepWorld } from './world';
+import { autopilotStep, clearFeverLane, collideWorld, resetWorld, spawnFeverLane, spawnGallery, stepWorld } from './world';
 import { createGenerator } from './world-gen';
-import { clearHazardsAhead, createSimCtx, stillLive } from './world-sim';
+import { addHitStop, clearHazardsAhead, createSimCtx, pitIndexAt, stillLive } from './world-sim';
 
 type HippoWindow = { __hippoRun?: DebugApi };
 
@@ -111,7 +117,18 @@ export function createGame(canvas: HTMLCanvasElement, opts?: GameOptions): GameH
 
   /* ---------------- setup ---------------- */
   const search = typeof location !== 'undefined' ? location.search : '';
-  const urlSeed = parseSeedParam(search);
+  let urlSeed = -1;
+  try {
+    urlSeed = parseSeedParam(search);
+  } catch (_e) {
+    // Malformed %-escape (?seed=%): hash the raw text instead, never throw out of createGame.
+    const m = /[?&]seed=([^&#]*)/.exec(search);
+    if (m) {
+      let hsh = 2166136261;
+      for (let i = 0; i < m[1].length; i++) hsh = Math.imul(hsh ^ m[1].charCodeAt(i), 16777619);
+      urlSeed = hsh >>> 0;
+    }
+  }
   const galleryMode = /[?&]gallery=1(?:&|#|$)/.test(search);
   const forcedSeed = options.seed !== undefined ? options.seed >>> 0 : urlSeed;
 
@@ -224,12 +241,50 @@ export function createGame(canvas: HTMLCanvasElement, opts?: GameOptions): GameH
   window.addEventListener('resize', requestResize);
   window.addEventListener('orientationchange', requestResize);
 
+  // devicePixelRatio changes (browser zoom, moving to another monitor) fire no resize event.
+  let dprMql: MediaQueryList | null = null;
+  function onDprChange(): void {
+    requestResize();
+    armDpr();
+  }
+  function disarmDpr(): void {
+    const m = dprMql;
+    dprMql = null;
+    if (m === null) return;
+    try {
+      if (typeof m.removeEventListener === 'function') m.removeEventListener('change', onDprChange);
+      else if (typeof m.removeListener === 'function') m.removeListener(onDprChange);
+    } catch (_e) {
+      /* ignore */
+    }
+  }
+  function armDpr(): void {
+    disarmDpr();
+    if (destroyed) return;
+    try {
+      if (typeof window.matchMedia !== 'function') return;
+      const m = window.matchMedia('(resolution: ' + (window.devicePixelRatio || 1) + 'dppx)');
+      if (!m) return;
+      if (typeof m.addEventListener === 'function') m.addEventListener('change', onDprChange);
+      else if (typeof m.addListener === 'function') m.addListener(onDprChange);
+      else return;
+      dprMql = m;
+    } catch (_e) {
+      dprMql = null;
+    }
+  }
+  armDpr();
+
   /* ---------------- auto-pause ---------------- */
+  /** Menus (title / dying / gameover) get their music back on return; a paused run stays silent. */
+  function resumeMenuAudio(): void {
+    if (state.mode !== 'paused' && state.mode !== 'playing') audio.resume();
+  }
   function onVisibility(): void {
     if (document.hidden) {
       pauseGame('hidden');
       audio.suspend();
-    }
+    } else resumeMenuAudio();
   }
   function onBlur(): void {
     input.releaseAll();
@@ -238,6 +293,7 @@ export function createGame(canvas: HTMLCanvasElement, opts?: GameOptions): GameH
   }
   document.addEventListener('visibilitychange', onVisibility);
   window.addEventListener('blur', onBlur);
+  window.addEventListener('focus', resumeMenuAudio);
 
   /* ---------------- state machine ---------------- */
   function setMode(m: GameMode): void {
@@ -375,7 +431,11 @@ export function createGame(canvas: HTMLCanvasElement, opts?: GameOptions): GameH
         break;
       case 'pause':
         if (state.mode === 'playing') pauseGame('user');
-        else if (state.mode === 'paused') resumeGame(false);
+        else if (state.mode === 'paused') {
+          // During the 3-2-1: back to the full pause menu (no resume).
+          if (state.pause.countdown > 0) state.pause.countdown = 0;
+          else resumeGame(false);
+        }
         break;
       case 'restart':
         if (state.mode === 'paused' || canRetry()) startRun();
@@ -433,15 +493,17 @@ export function createGame(canvas: HTMLCanvasElement, opts?: GameOptions): GameH
     f.active = true;
     f.t = FEVER.duration;
     f.count++;
+    f.introT = 0;
     state.run.groove = GROOVE.max;
     h.exprT = 0;
     h.expr = 'star';
+    // Entry beat (ui draws the TOTOTO TIME banner from fever.introT).
+    addHitStop(state, HITSTOP.fever);
+    fx.shake(SHAKE.fever);
     fx.flash(PAL.grooveB, 0.35);
-    fx.popup(h.x + 40, h.y - 130, UI_TEXT.fever, PAL.grooveB, 'lg');
     fx.burst('star', h.x, h.y - 40, 10);
     audio.play('feverStart');
-    // The chunk generated next lands about where the fever ends: make it a breather.
-    sim.gen.forceBreather = true;
+    spawnFeverLane(state, sv, sim);
   }
 
   function endFever(): void {
@@ -452,44 +514,43 @@ export function createGame(canvas: HTMLCanvasElement, opts?: GameOptions): GameH
     state.run.groove = 0;
     if (h.invulnT < FEVER.exitInvuln) h.invulnT = FEVER.exitInvuln;
     clearHazardsAhead(state, sv, sim, GEN.safeAfterEventS, FEVER.clearAhead, -1);
+    clearFeverLane(state, sv, sim);
     audio.play('feverEnd');
+    // One breather per fever: the chunk generated next lands just after the exit.
     sim.gen.forceBreather = true;
   }
 
   /* ---------------- goals ---------------- */
+  /** Goal `gi` satisfied by this run's stats. */
+  function goalMet(gi: number): boolean {
+    const r = state.run;
+    if (gi < 0 || gi >= GOALS.length) return false;
+    switch (GOALS[gi].id) {
+      case 'chain3':
+        return r.chainBest >= 3;
+      case 'noon':
+        return (r.phasesSeen & 2) !== 0;
+      case 'boom':
+        return r.booms > 0;
+      case 'stomp':
+        return sim.hornbillStomps > 0;
+      case 'fever':
+        return state.fever.count > 0;
+      case 'chain6':
+        return r.chainBest >= 6;
+      case 'dusk':
+        return (r.phasesSeen & 4) !== 0;
+      case 'night':
+        return (r.phasesSeen & 8) !== 0;
+    }
+    return false;
+  }
+
   function checkGoal(): void {
     const r = state.run;
     if (r.goalDone) return;
     const gi = sim.goalAtStart;
-    if (gi < 0 || gi >= GOALS.length) return;
-    let done = false;
-    switch (GOALS[gi].id) {
-      case 'chain3':
-        done = r.chainBest >= 3;
-        break;
-      case 'noon':
-        done = (r.phasesSeen & 2) !== 0;
-        break;
-      case 'boom':
-        done = r.booms > 0;
-        break;
-      case 'stomp':
-        done = sim.hornbillStomps > 0;
-        break;
-      case 'fever':
-        done = state.fever.count > 0;
-        break;
-      case 'chain6':
-        done = r.chainBest >= 6;
-        break;
-      case 'dusk':
-        done = (r.phasesSeen & 4) !== 0;
-        break;
-      case 'night':
-        done = (r.phasesSeen & 8) !== 0;
-        break;
-    }
-    if (done) {
+    if (goalMet(gi)) {
       r.goalDone = true;
       showToast('GOAL ✓ ' + GOALS[gi].label);
     }
@@ -509,40 +570,118 @@ export function createGame(canvas: HTMLCanvasElement, opts?: GameOptions): GameH
     sim.freezeDone = true;
   }
 
+  /**
+   * BOING moment: slamming down onto plain ground (not a drum / stompable top: that is a BOOM; not a
+   * pit: that is a SPLORCH), or on the ground inside the boing window after a slam.
+   */
+  function boingMoment(): boolean {
+    const h = state.hero;
+    if (h.grounded) return h.postSlamT <= PHYS.boingWindow;
+    if (h.action !== 'slamHang' && h.action !== 'slam') return false;
+    const dive = (h.action === 'slamHang' ? h.hangT : 0) + Math.max(0, GROUND_Y - h.y) / PHYS.slamVy;
+    const lx = h.x + state.run.speed * dive;
+    if (pitIndexAt(state, lx) >= 0) return false;
+    const half = HERO.hurtW / 2 + PHYS.landWiden;
+    const ents = state.entities;
+    for (let i = 0; i < ents.length; i++) {
+      const e = ents[i];
+      if (!e.active || !e.stompable || e.flag !== 'none' || e.y < h.y - 1) continue;
+      if (lx + half > e.x && h.x - half < e.x + e.w) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Prompts (priority tap > slam/drum > boing > hold) + teaching freeze + lesson slow-mo triggers.
+   * First run: TAP at the first bush; JUMP ON THE DRUM / SLAM (on Toto, near the apex after drum 1)
+   * at the lesson drum pair; BOING on Toto during any ground slam. Runs 1-3: HOLD over the first
+   * mound. Every trigger reads sim state only.
+   */
   function tutorialStep(): void {
     const tu = state.tutorial;
     const h = state.hero;
-    if (!tu.active) {
-      setPrompt('none');
-      return;
+    const bushLive = stillLive(sim.tutBush, sim.tutBushSerial);
+    // Assisted first jump: a ground jump pressed within TUTORIAL.assistS of the lesson bush is never
+    // cut, so any tap clears it (also in reduced motion, which has no freeze). Before endFreeze.
+    if (state.firstRun && bushLive && sim.pressed && sim.jumped && h.action === 'air') {
+      const ttc = (sim.tutBushLeft - (h.x + HERO.hurtW / 2)) / state.run.speed;
+      if (ttc > 0 && ttc <= TUTORIAL.assistS) {
+        sim.cuttable = false;
+        h.cutPending = false;
+      }
     }
-    if (state.run.time > TUTORIAL.promptsEnd) {
+    if (sim.pressed) sim.lessonSlowT = 0;
+    if (tu.active && state.run.time > TUTORIAL.promptsEnd) {
       tu.active = false;
-      setPrompt('none');
       endFreeze();
-      return;
     }
     let p: TutorialPrompt = 'none';
     let px = 0;
     let py = 0;
-    const bushLive = stillLive(sim.tutBush, sim.tutBushSerial);
-    if (bushLive && h.x < sim.tutBushX + 30 && sim.tutBushX - h.x < 760) {
-      p = 'tap';
-      px = sim.tutBushX;
-      py = sim.tutBushTop - 64;
-    } else if (sim.tutSlamX0 > 0 && h.x < sim.tutSlamX1 + 40 && sim.tutSlamX0 - h.x < 760) {
-      p = 'slam';
-      px = (sim.tutSlamX0 + sim.tutSlamX1) / 2;
-      py = GROUND_Y - 250;
-    } else if (stillLive(sim.tutGold, sim.tutGoldSerial) && h.x < sim.tutGoldX + 20 && sim.tutGoldX - h.x < 820) {
-      p = 'boing';
-      px = sim.tutGoldX;
-      py = sim.tutGoldY + 56;
+    if (tu.active) {
+      if (bushLive && h.x < sim.tutBushX + 30 && sim.tutBushX - h.x < 760) {
+        p = 'tap';
+        px = sim.tutBushX;
+        py = sim.tutBushTop - 64;
+      } else if (sim.tutSlamX0 > 0 && h.x > sim.tutSlamX0 - 760 && h.x < sim.tutSlamX1 + 40) {
+        if (h.grounded && h.x < sim.tutSlamX0) {
+          p = 'drum';
+          px = sim.tutSlamX0;
+          py = GROUND_Y - 150;
+        } else if (h.action === 'air' && state.run.chain >= 1 && !h.slamUsed && h.vy > -250) {
+          p = 'slam';
+          px = h.x;
+          py = h.y - 110;
+          if (!sim.slamTaught) {
+            sim.slamTaught = true;
+            sim.lessonSlowT = TUTORIAL.slamSlowMax;
+          }
+        }
+      }
+      if (p === 'none' && boingMoment()) {
+        p = 'boing';
+        px = h.x;
+        py = GROUND_Y - 120;
+        // Lesson order TAP -> SLAM -> BOING: no BOING slow-mo before the TAP bush is behind Toto.
+        if (!sim.boingTaught && h.x >= sim.tutBushX + 30) {
+          sim.boingTaught = true;
+          sim.lessonSlowT = TUTORIAL.boingSlowMax;
+        }
+      } else if (
+        p === 'none' &&
+        h.action === 'air' &&
+        stillLive(sim.tutGold, sim.tutGoldSerial) &&
+        h.x < sim.tutGoldX + 20 &&
+        sim.tutGoldX - h.x < 820
+      ) {
+        // The golden mango on the BOING line (airborne only: tapping while running is a jump).
+        p = 'boing';
+        px = sim.tutGoldX;
+        py = sim.tutGoldY + 56;
+      }
+    }
+    // HOLD over the first live mound (runs 1-3, independent of the first-run tutorial).
+    if (p === 'none' && !sim.holdShown && state.save.runs < TUTORIAL.holdRuns) {
+      const ents = state.entities;
+      let best: Entity | null = null;
+      for (let i = 0; i < ents.length; i++) {
+        const e = ents[i];
+        if (!e.active || e.kind !== 'mound' || e.flag !== 'none') continue;
+        if (e.x + e.w / 2 < h.x) {
+          if (e.serial === sim.holdSerial) sim.holdShown = true;
+        } else if (best === null || e.x < best.x) best = e;
+      }
+      if (!sim.holdShown && best !== null && best.x + best.w / 2 - h.x <= 760) {
+        p = 'hold';
+        px = best.x + best.w / 2;
+        py = best.y - 64;
+        sim.holdSerial = best.serial;
+      }
     }
     setPrompt(p);
     tu.promptX = px;
     tu.promptY = py;
-    // Teaching freeze: no jump started 0.45 s before touching the first bush.
+    // Teaching freeze: no jump started TUTORIAL.freezeLead s before touching the first bush.
     if (p === 'tap' && bushLive && !sim.freezeDone && !tu.freeze && h.grounded && !state.save.reducedMotion) {
       const ttc = (sim.tutBushLeft - (h.x + HERO.hurtW / 2)) / state.run.speed;
       if (ttc <= TUTORIAL.freezeLead && ttc > 0) {
@@ -565,7 +704,8 @@ export function createGame(canvas: HTMLCanvasElement, opts?: GameOptions): GameH
     r.multiplier = multiplierFor(r.chain);
     // Trigger BEFORE the grounded decay, so a meter filled to 100 this step always fires.
     if (!state.fever.active && r.groove >= GROOVE.max) startFever();
-    if (!state.fever.active && h.grounded && r.groove > 0) {
+    // Decays on the ground and on chainless flights (jumps / boings), never during a chain.
+    if (!state.fever.active && (h.grounded || r.chain === 0) && r.groove > 0) {
       r.groove -= GROOVE.decayPerS * dt;
       if (r.groove < 0) r.groove = 0;
     }
@@ -609,9 +749,13 @@ export function createGame(canvas: HTMLCanvasElement, opts?: GameOptions): GameH
     sm.medal = medalFor(r.score);
     const caps = DEATH_CAPTIONS[state.deathCause !== null ? state.deathCause : 'bush'];
     sm.caption = caps[crng.int(0, caps.length - 1)];
+    if (state.deathCause === 'mound' && s.runs < TUTORIAL.holdCaptionRuns) sm.caption = UI_TEXT.holdCaption;
+    if (!r.goalDone && goalMet(sim.goalAtStart)) r.goalDone = true; // met on the fatal step
     sm.goalDone = r.goalDone;
     sm.goalDoneText = r.goalDone ? goalLabel(sim.goalAtStart) : '';
     if (r.goalDone && s.goalIndex === sim.goalAtStart && s.goalIndex < GOALS.length) s.goalIndex++;
+    // Never show "Next:" for something this run already did.
+    while (s.goalIndex < GOALS.length && goalMet(s.goalIndex)) s.goalIndex++;
     sm.goalText = goalLabel(s.goalIndex);
     if (r.score > s.best) s.best = r.score;
     if (dist > s.bestDist) s.bestDist = dist;
@@ -626,6 +770,7 @@ export function createGame(canvas: HTMLCanvasElement, opts?: GameOptions): GameH
 
   function simStep(dt: number): void {
     sim.pressed = false;
+    sim.jumped = false;
     drainSimInput(); // 1
     if (state.mode !== 'playing' && state.mode !== 'dying') return;
     if (state.debug.autopilot && state.mode === 'playing') autopilotStep(state, sv, sim);
@@ -648,9 +793,9 @@ export function createGame(canvas: HTMLCanvasElement, opts?: GameOptions): GameH
       return;
     }
     acc += realDt * state.timeScale;
-    // Teaching freeze runs the sim at 0.15x: a pending press must not wait ~55 ms for the next
-    // slow step. Run one step now so the jump fires on this frame (the freeze then eases out).
-    if (state.tutorial.freeze && acc < DT && input.pending() > 0) acc = DT;
+    // Slow-mo (teaching freeze 0.02x, lesson 0.25x, near miss 0.6x): a pending press must not wait
+    // for the next slow step. Run one step now so it acts on this frame (the slow-mo then eases out).
+    if (state.mode === 'playing' && state.timeScale < 1 && acc < DT && input.pending() > 0) acc = DT;
     let steps = 0;
     while (acc >= DT && steps < MAX_STEPS_PER_FRAME) {
       simStep(DT);
@@ -660,16 +805,21 @@ export function createGame(canvas: HTMLCanvasElement, opts?: GameOptions): GameH
         acc = 0;
         break;
       }
-      if (state.hitStop > 0) break;
+      if (state.hitStop > 0) {
+        // Frozen until the hit-stop ends: never let render extrapolate past the last step.
+        if (acc >= DT) acc = DT * 0.999;
+        break;
+      }
     }
     if (steps >= MAX_STEPS_PER_FRAME && acc >= DT) acc = 0;
-    state.clock.alpha = acc / DT;
+    state.clock.alpha = Math.min(1, acc / DT);
   }
 
-  /** Real-time pacing: timeScale (death slow-mo, near-miss blip, teaching freeze) + death card. */
+  /** Real-time pacing: timeScale (death slow-mo, near-miss blip, lesson slow-mo, teaching freeze) + death card. */
   function pacing(realDt: number): void {
     const rm = state.save.reducedMotion;
     const tu = state.tutorial;
+    if (sim.lessonSlowT > 0) sim.lessonSlowT = Math.max(0, sim.lessonSlowT - realDt);
     if (tu.freeze) {
       sim.freezeReal += realDt;
       if (sim.freezeReal >= TUTORIAL.freezeMax) endFreeze();
@@ -688,6 +838,7 @@ export function createGame(canvas: HTMLCanvasElement, opts?: GameOptions): GameH
       }
     } else {
       if (!rm && sim.nearSlowT > 0) ts = NEAR_MISS.slowScale;
+      if (!rm && sim.lessonSlowT > 0 && state.mode === 'playing' && TUTORIAL.lessonScale < ts) ts = TUTORIAL.lessonScale;
       if (sim.freezeLevel > 0) {
         const k = sim.freezeLevel;
         const e = k * k * (3 - 2 * k);
@@ -753,6 +904,7 @@ export function createGame(canvas: HTMLCanvasElement, opts?: GameOptions): GameH
     state.banner.t += realDt;
     state.toast.t += realDt;
     state.tutorial.promptT += realDt;
+    if (state.fever.active && state.mode !== 'paused') state.fever.introT += realDt;
     if (state.mode !== 'paused') fx.update(realDt);
   }
 
@@ -840,7 +992,7 @@ export function createGame(canvas: HTMLCanvasElement, opts?: GameOptions): GameH
         for (let i = 0; i < pool.length; i++) {
           const e = pool[i];
           if (!e.active) continue;
-          out.push({ kind: e.kind, x: e.x, y: e.y, w: e.w, h: e.h, vx: e.vx, flag: e.flag, hazard: e.hazard, serial: e.serial });
+          out.push({ kind: e.kind, x: e.x, y: e.y, w: e.w, h: e.h, vx: e.vx, flag: e.flag, hazard: e.hazard, serial: e.serial, lane: e.lane });
         }
       }
       return out;
@@ -923,6 +1075,8 @@ export function createGame(canvas: HTMLCanvasElement, opts?: GameOptions): GameH
       window.removeEventListener('orientationchange', requestResize);
       document.removeEventListener('visibilitychange', onVisibility);
       window.removeEventListener('blur', onBlur);
+      window.removeEventListener('focus', resumeMenuAudio);
+      disarmDpr();
       input.destroy();
       audio.destroy();
       renderer.destroy();

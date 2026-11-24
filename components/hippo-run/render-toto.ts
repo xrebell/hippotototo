@@ -39,6 +39,8 @@ export interface TotoView {
   night: number;
   /** Render time (s) for idle wobbles. */
   time: number;
+  /** Uniform draw scale about the feet (TOTOTO TIME entry pop; 1 otherwise). Cosmetic only. */
+  scale: number;
 }
 
 export function makeTotoView(): TotoView {
@@ -60,6 +62,7 @@ export function makeTotoView(): TotoView {
     deathT: 0,
     night: 0,
     time: 0,
+    scale: 1,
   };
 }
 
@@ -818,7 +821,8 @@ export function createTotoRig(blinkSalt: number): TotoRig {
     y: number,
     withBob: boolean,
   ): void {
-    ctx.setTransform(K, 0, 0, K, ox + x * K, oy + y * K);
+    const k = K * (v.scale > 0 ? v.scale : 1);
+    ctx.setTransform(k, 0, 0, k, ox + x * K, oy + y * K);
     ctx.scale(v.squashX, v.squashY);
     const r = v.rot + tilt;
     if (r !== 0) {
@@ -898,7 +902,9 @@ export function createTotoRig(blinkSalt: number): TotoRig {
 
       // Bandana tails (simulated in screen space, draped around the body) go behind everything.
       if (ready) {
-        ctx.setTransform(K, 0, 0, K, ox, oy);
+        // screen-space tails, scaled about the feet with the body (v.scale)
+        const sc = v.scale > 0 ? v.scale : 1;
+        ctx.setTransform(K * sc, 0, 0, K * sc, ox + x * K * (1 - sc), oy + y * K * (1 - sc));
         drawRibbons(ctx, x - simFeetX, y - simFeetY, ink);
       }
       // Toto local transform: feet -> squash -> rotate about pivot (bob added after the legs).

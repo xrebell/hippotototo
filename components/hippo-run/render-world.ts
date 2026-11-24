@@ -33,6 +33,8 @@ export interface BgFrame {
   night: number;
   dusk: number;
   lowQ: boolean;
+  /** TOTOTO TIME beat pulse 0..1 on the ground's top stripe (0 outside fever / reduced motion). */
+  feverPulse: number;
   glow: HTMLCanvasElement | null;
   glowCool: HTMLCanvasElement | null;
 }
@@ -53,10 +55,13 @@ export function makeBgFrame(): BgFrame {
     night: 0,
     dusk: 0,
     lowQ: false,
+    feverPulse: 0,
     glow: null,
     glowCool: null,
   };
 }
+
+const FEVER_STRIPE = '#FFFFFF';
 
 const SALT_MESA = 11;
 const SALT_TREE = 23;
@@ -493,6 +498,13 @@ export function drawGround(ctx: CanvasRenderingContext2D, b: BgFrame, t: PhaseTa
   ctx.fillRect(-4, gy, W + 8, bottom - gy);
   ctx.fillStyle = t.groundTop[k];
   ctx.fillRect(-4, gy, W + 8, 13);
+  if (b.feverPulse > 0.004) {
+    // TOTOTO TIME: the trail's top stripe brightens up to 15% on every beat.
+    ctx.globalAlpha = 0.15 * (b.feverPulse > 1 ? 1 : b.feverPulse);
+    ctx.fillStyle = FEVER_STRIPE;
+    ctx.fillRect(-4, gy, W + 8, 13);
+    ctx.globalAlpha = 1;
+  }
   ctx.fillStyle = t.groundLight[k];
   ctx.fillRect(-4, gy, W + 8, 2.5);
   ctx.fillStyle = t.groundEdge[k];

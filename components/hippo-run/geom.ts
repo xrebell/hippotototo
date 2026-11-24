@@ -5,7 +5,8 @@
  * Rules (spec §4):
  *  - Hero sprite 76 x 60, origin at FEET CENTRE (hero.x, hero.y).
  *  - Hero hurtbox 48 x 42, centred in x, bottom 4 u above the feet.
- *  - Hazard hitbox = drawn box inset 15% of its width (7.5% per side) and 8 u off the top.
+ *  - Hazard hitbox = drawn box inset 15% of its width (7.5% per side) and 8 u off the top
+ *    (thorn bush: 30% / 12 u, a wider quick-tap window; see insetWFracFor / insetTopFor).
  *  - Pickup box = hurtbox expanded by 18 u on every side.
  */
 import { GROUND_Y, HERO, HITBOX, PIT } from './config';
@@ -47,19 +48,31 @@ export function isLethalKind(kind: Entity['kind']): boolean {
   return kind === 'bush' || kind === 'mound' || kind === 'hornbill' || kind === 'log';
 }
 
+/** Total width fraction a lethal kind's hitbox is inset by (split over both sides). */
+export function insetWFracFor(kind: Entity['kind']): number {
+  return kind === 'bush' ? HITBOX.bushInsetWFrac : HITBOX.insetWFrac;
+}
+
+/** Units a lethal kind's hitbox is inset from the top. */
+export function insetTopFor(kind: Entity['kind']): number {
+  return kind === 'bush' ? HITBOX.bushInsetTop : HITBOX.insetTop;
+}
+
 /**
  * Hitbox of an entity.
- *  - bush / mound / hornbill / log: drawn box inset 7.5% of width per side, 8 u off the top.
+ *  - bush / mound / hornbill / log: drawn box inset per kind (insetWFracFor / insetTopFor):
+ *    7.5% of width per side and 8 u off the top; bush 15% per side and 12 u.
  *  - pit: the deadly span [x + 6, x + w - 6], from GROUND_Y down to the mud surface.
  *  - everything else: the drawn box.
  */
 export function entityHitbox(e: ReadEntity, out: Box): Box {
   if (isLethalKind(e.kind)) {
-    const inset = e.w * HITBOX.insetWFrac * 0.5;
+    const inset = e.w * insetWFracFor(e.kind) * 0.5;
+    const top = insetTopFor(e.kind);
     out.x = e.x + inset;
     out.w = e.w - inset * 2;
-    out.y = e.y + HITBOX.insetTop;
-    out.h = e.h - HITBOX.insetTop;
+    out.y = e.y + top;
+    out.h = e.h - top;
     if (out.h < 1) out.h = 1;
     return out;
   }

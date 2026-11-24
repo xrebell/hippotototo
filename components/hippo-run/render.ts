@@ -13,6 +13,12 @@
  *  - Transform: ctx.setTransform(dpr*s, 0, 0, dpr*s, dpr*padX, 0) is the BASE transform. Sky and
  *    soil extend to the full logical view (0..viewW, 0..viewH); pillarbox sides (padX > 0) are
  *    filled with VIEW.pillarColor in device space and everything else is clipped to the view.
+ *  - TOTOTO TIME look (driven only by state.fever.active / .t / .introT): the sky gradient blends
+ *    up to 35% toward #FF5A5F (top) -> #FFB627 (horizon), easing in over 0.4 s and out over the last
+ *    FEVER.warn s, quantised to FEVER_SKY_STEPS and part of the sky cache key (so it is rebuilt only
+ *    while that blend or the 64-step phase blend moves); the ground's top stripe brightens 15% on
+ *    every beat (not in reduced motion); Toto pops 1.25x -> 1x over 0.3 s at the start (draw only,
+ *    not in reduced motion). The fever-smash debris itself is fx.ts (burst bias).
  *  - Layer order (spec §9): sky gradient (cached per 64-step phase blend) -> stars (night) ->
  *    sun/moon (arc = 0.02 scroll) -> clouds -> distant kites -> far mesas (0.10) -> hills (0.25) ->
  *    acacias/rocks (0.50) -> ground -> pits -> dusk tint -> shadows -> best flag -> gameplay
@@ -26,7 +32,7 @@ import { DRUM, FEVER, GROUND_Y, HERO, PAL, PIT, VIEW } from './config';
 import type { FxApi, ReadState, Renderer, Rng, ViewMetrics } from './types';
 import { entityHitbox, heroHurtboxAt, makeBox } from './geom';
 import type { REntity } from './render-util';
-import { buildPhaseTable, easeOut, oval, phaseKey, phaseWeight } from './render-util';
+import { buildPhaseTable, easeOut, mixHex, oval, phaseKey, phaseWeight, smooth01 } from './render-util';
 import type { EntFrame } from './render-entities';
 import {
   drawBestFlag,
@@ -70,6 +76,36 @@ const BUF_FY = 140;
 
 const DEBUG_FONT = 'bold 12px ui-monospace, Menlo, Consolas, monospace';
 
+/* TOTOTO TIME look */
+const FEVER_SKY_TOP = '#FF5A5F';
+const FEVER_SKY_BOTTOM = '#FFB627';
+/** Same 0.58 mid stop the phase skies use. */
+const FEVER_SKY_MID = mixHex(FEVER_SKY_TOP, FEVER_SKY_BOTTOM, 0.58);
+const FEVER_SKY_MIX = 0.35;
+const FEVER_SKY_STEPS = 16;
+const FEVER_EASE_IN = 0.4;
+/** A fever that ends early (restart) still fades the sky out over this long instead of popping. */
+const FEVER_SKY_FADE = 0.4;
+const FEVER_POP = 1.25;
+const FEVER_POP_T = 0.3;
+
+/** Real seconds since the current fever started (introT when gameplay keeps it, else sim time). */
+function feverSince(state: ReadState): number {
+  const f = state.fever;
+  const it = f.introT;
+  if (typeof it === 'number' && it >= 0 && it < 90) return it;
+  return FEVER.duration - f.t;
+}
+
+/** 0..1 strength of the fever sky: ease in over 0.4 s, out over the last FEVER.warn s. */
+function feverSkyTarget(state: ReadState): number {
+  const f = state.fever;
+  if (!f.active) return 0;
+  const wIn = smooth01(feverSince(state) / FEVER_EASE_IN);
+  const wOut = smooth01(f.t / FEVER.warn);
+  return wIn < wOut ? wIn : wOut;
+}
+
 function makeGlow(doc: Document, size: number, c0: string, c1: string, c2: string): HTMLCanvasElement | null {
   try {
     const cv = doc.createElement('canvas');
@@ -110,9 +146,10 @@ export function createRenderer(ctx: CanvasRenderingContext2D, fx: FxApi, crng: R
   bg.glow = glow;
   bg.glowCool = glowCool;
 
-  // Sky gradient cache
+  // Sky gradient cache (key = phase key * (FEVER_SKY_STEPS + 1) + fever step)
   let sky: CanvasGradient | null = null;
   let skyKey = -1;
+  let feverW = 0;
   let skyVersion = -1;
   let skyH = -1;
 
@@ -282,6 +319,12 @@ export function createRenderer(ctx: CanvasRenderingContext2D, fx: FxApi, crng: R
     tv.deathT = h.deathT;
     tv.night = ef.night;
     tv.time = rt;
+    // TOTOTO TIME entry pop (render only; hitboxes untouched). Skipped in reduced motion.
+    tv.scale = 1;
+    if (state.fever.active && !reduced) {
+      const since = feverSince(state);
+      if (since >= 0 && since < FEVER_POP_T) tv.scale = 1 + (FEVER_POP - 1) * (1 - easeOut(since / FEVER_POP_T));
+    }
     if (state.fever.active && h.expr !== 'dizzy' && h.expr !== 'sleep') tv.expr = 'star';
     // pupils look at the nearest hazard (world look target from gameplay)
     const dx = h.lookX - (heroWX + 20);
@@ -487,6 +530,21 @@ export function createRenderer(ctx: CanvasRenderingContext2D, fx: FxApi, crng: R
       bg.dusk = dusk;
       bg.lowQ = state.clock.lowQuality;
 
+      // TOTOTO TIME strength (analytic ease; an early end fades over FEVER_SKY_FADE instead of popping)
+      let fw = feverSkyTarget(state);
+      if (fw < feverW) {
+        const floor = feverW - dt / FEVER_SKY_FADE;
+        if (fw < floor) fw = floor;
+      }
+      feverW = fw > 0 ? fw : 0;
+      if (feverW > 0 && !reduced) {
+        const bp = state.music.beatPhase;
+        const u = bp >= 0 && bp < 1 ? 1 - bp : 0;
+        bg.feverPulse = feverW * u * u;
+      } else {
+        bg.feverPulse = 0;
+      }
+
       ef.K = K;
       ef.PX = PX;
       ef.camX = camI + shX;
@@ -504,13 +562,23 @@ export function createRenderer(ctx: CanvasRenderingContext2D, fx: FxApi, crng: R
 
       // ---- sky (cached gradient) ----
       const horizon = GROUND_Y + v.offsetY;
-      if (sky === null || key !== skyKey || v.version !== skyVersion || horizon !== skyH) {
+      const fs = Math.round(feverW * FEVER_SKY_STEPS);
+      const sk = key * (FEVER_SKY_STEPS + 1) + fs;
+      if (sky === null || sk !== skyKey || v.version !== skyVersion || horizon !== skyH) {
         const g = ctx.createLinearGradient(0, 0, 0, horizon);
-        g.addColorStop(0, table.skyTop[key]);
-        g.addColorStop(0.62, table.skyMid[key]);
-        g.addColorStop(1, table.skyBottom[key]);
+        if (fs === 0) {
+          g.addColorStop(0, table.skyTop[key]);
+          g.addColorStop(0.62, table.skyMid[key]);
+          g.addColorStop(1, table.skyBottom[key]);
+        } else {
+          // Cache miss only (a new gradient is built here anyway): mix toward the festival sky.
+          const m = (fs / FEVER_SKY_STEPS) * FEVER_SKY_MIX;
+          g.addColorStop(0, mixHex(table.skyTop[key], FEVER_SKY_TOP, m));
+          g.addColorStop(0.62, mixHex(table.skyMid[key], FEVER_SKY_MID, m));
+          g.addColorStop(1, mixHex(table.skyBottom[key], FEVER_SKY_BOTTOM, m));
+        }
         sky = g;
-        skyKey = key;
+        skyKey = sk;
         skyVersion = v.version;
         skyH = horizon;
       }

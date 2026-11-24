@@ -15,9 +15,21 @@
  *    vignette steady (no beat pulse), popups fade in instead of scaling.
  *  - Popups: scale 0 -> 1.2 -> 1 in 150 ms, drift up 30 u, fade out over the end of their life
  *    ('lg' lives longer). They partly follow the camera so text stays readable next to Toto.
+ *    Lanes: each new popup takes one of 4 vertical lanes (26 u apart, upward from its anchor): the
+ *    lowest lane not handed out in the last 0.35 s (real), else the one handed out longest ago. A
+ *    lane whose text box would cross a still-visible popup (now, or later as the younger text drifts
+ *    up faster) is passed over for the next candidate, so a big 'lg' text skips a lane instead of
+ *    overlapping; if every lane collides the first candidate is used. Near the top of the view the
+ *    lanes stack downward. In portrait (cssH > cssW) a popup is scaled so its width is <= 45% of
+ *    viewW; every popup is clamped inside the view (below the HUD band). Text widths come from a
+ *    per-character table measured once on the first drawWorld (no measureText per popup).
  *  - Rings: 'drum' (hue, 0.3 s), 'shock' (0 -> 120 u in 0.22 s), 'boing', 'pickup'.
  *  - drawScreen(): fever speed lines + warm vignette (state.fever.active), full-screen flash.
  *  - setLowQuality(true): halve every burst count (adaptive DPR fallback).
+ *  - TOTOTO TIME smash: a 'poof' / 'star' burst at a hazard gameplay has just flagged 'smashed'
+ *    while the fever is active gets a +260 u/s forward velocity bias, and the poof adds a handful of
+ *    debris pieces in the hazard's own material (bush thorns, mound clods, log chips, feathers), so
+ *    the wreckage flies on ahead of Toto. Debris count is halved in low quality like any burst.
  *  - Randomness: event-time spawns use the COSMETIC rng; frame-driven cosmetics (speed lines) use
  *    a private LCG so the cosmetic stream's sequence does not depend on the frame rate.
  */
@@ -73,6 +85,35 @@ const VIGNETTE_MID = 'rgba(255,126,63,0.35)';
 const VIGNETTE_EDGE = 'rgba(255,110,50,1)';
 const SPEED_LINE_WARM = '#FFE2B8';
 
+/* Smash debris (TOTOTO TIME) */
+const SMASH_BIAS = 260;
+const SMASH_DEBRIS = 7;
+const BUSH_DEBRIS: ReadonlyArray<string> = [PAL.bush, PAL.bushDark, PAL.thorn, '#3F7A63'];
+const MOUND_DEBRIS: ReadonlyArray<string> = [PAL.mound, PAL.moundDark, PAL.moundCrown, '#D08A4A'];
+const M_NONE = -1;
+const M_BUSH = 0;
+const M_MOUND = 1;
+const M_LOG = 2;
+const M_FEATHER = 3;
+
+/* Popup lanes */
+const POPUP_PX: ReadonlyArray<number> = [17, 23, 33];
+/** Half height of the drawn glyphs (cap height ~0.72 em, plus half the outline). */
+const POPUP_HH: ReadonlyArray<number> = [17 * 0.36 + 2.5, 23 * 0.36 + 3, 33 * 0.36 + 4];
+const LANES = 4;
+const LANE_DY = 26;
+const LANE_HOLD = 0.35;
+/** Collision margins for lane choice: two popups popping together / the 1.2x pop overshoot. */
+const LANE_PAD = 1.1;
+const POP_OVER = 1.2;
+/** Share of a popup's life it still counts for lane choice (alpha is ~0.35 at this point). */
+const POPUP_VISIBLE = 0.86;
+const PORTRAIT_MAX_W = 0.45;
+/** Logical u at the top of the view kept for the HUD (score / groove meter / buttons). */
+const HUD_TOP = 44;
+const EDGE = 6;
+const CHAR_N = 96;
+
 /* ------------------------------------------------------------------ */
 /* Pooled records                                                      */
 /* ------------------------------------------------------------------ */
@@ -100,6 +141,7 @@ interface Particle {
 interface Popup {
   on: boolean;
   x: number;
+  /** Base y: anchor + lane offset (world u, before drift). */
   y: number;
   cam0: number;
   text: string;
@@ -107,7 +149,9 @@ interface Popup {
   size: number;
   t: number;
   life: number;
-  lift: number;
+  lane: number;
+  /** Unscaled text width incl. outline (u). */
+  w: number;
 }
 
 interface Ring {
@@ -204,7 +248,7 @@ export function createFx(state: GameState, crng: Rng): FxApi {
   for (let i = 0; i < NP; i++) parts.push(makeParticle());
   const pops: Popup[] = [];
   for (let i = 0; i < NPOP; i++) {
-    pops.push({ on: false, x: 0, y: 0, cam0: 0, text: '', color: WHITE, size: 0, t: 0, life: 1, lift: 0 });
+    pops.push({ on: false, x: 0, y: 0, cam0: 0, text: '', color: WHITE, size: 0, t: 0, life: 1, lane: 0, w: 0 });
   }
   const rings: Ring[] = [];
   for (let i = 0; i < NR; i++) rings.push({ on: false, k: 0, x: 0, y: 0, color: WHITE, t: 0, dur: 1 });
@@ -215,6 +259,14 @@ export function createFx(state: GameState, crng: Rng): FxApi {
   let activeParticles = 0;
   let lowQ = false;
   let time = 0;
+
+  // Popup lanes: real time each lane was last handed out; candidate order scratch.
+  const laneT = new Float64Array(LANES);
+  laneT.fill(-1e9);
+  const laneOrd = new Int8Array(LANES);
+  // Per-character advance widths of the three popup fonts (measured once, first drawWorld).
+  const charW = new Float32Array(3 * CHAR_N);
+  let charReady = false;
 
   // Flash
   let flashColor = WHITE;
@@ -258,7 +310,7 @@ export function createFx(state: GameState, crng: Rng): FxApi {
     return fallback;
   }
 
-  function spawnOne(k: number, x: number, y: number, hue: number, i: number, n: number): void {
+  function spawnOne(k: number, x: number, y: number, hue: number, i: number, n: number): Particle {
     const p = allocParticle();
     p.on = true;
     p.k = k;
@@ -429,6 +481,128 @@ export function createFx(state: GameState, crng: Rng): FxApi {
         p.on = false;
         break;
     }
+    return p;
+  }
+
+  /** Material of a hazard gameplay flagged 'smashed' this very step at centre x (else M_NONE). */
+  function smashedMaterialAt(x: number): number {
+    const list = state.entities;
+    for (let i = 0; i < list.length; i++) {
+      const e = list[i];
+      if (!e.active || !e.hazard || e.flag !== 'smashed' || e.stateT !== 0) continue;
+      const d = e.x + e.w * 0.5 - x;
+      if (d > 1 || d < -1) continue;
+      switch (e.kind) {
+        case 'bush':
+          return M_BUSH;
+        case 'mound':
+          return M_MOUND;
+        case 'log':
+          return M_LOG;
+        case 'hornbill':
+          return M_FEATHER;
+        default:
+          return M_LOG;
+      }
+    }
+    return M_NONE;
+  }
+
+  /** Smash wreckage in the hazard's material, thrown forward (ahead of Toto). */
+  function spawnDebris(mat: number, x: number, y: number): void {
+    let n = SMASH_DEBRIS;
+    if (lowQ) n = (n + 1) >> 1;
+    const k = mat === M_MOUND ? K_PEBBLE : mat === M_FEATHER ? K_FEATHER : K_CHIP;
+    for (let i = 0; i < n; i++) {
+      const p = spawnOne(k, x, y, -1, i, n);
+      if (mat === M_BUSH) {
+        p.color = pick(BUSH_DEBRIS, crng.next());
+        p.size *= 1.15;
+      } else if (mat === M_MOUND) {
+        p.color = pick(MOUND_DEBRIS, crng.next());
+        p.size *= 1.25;
+      }
+      p.vx += SMASH_BIAS;
+    }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Popup layout helpers                                                */
+  /* ------------------------------------------------------------------ */
+
+  function measureChars(ctx: CanvasRenderingContext2D): void {
+    const prev = ctx.font;
+    for (let s = 0; s < 3; s++) {
+      ctx.font = POPUP_FONTS[s];
+      for (let c = 0; c < CHAR_N; c++) {
+        const w = ctx.measureText(String.fromCharCode(32 + c)).width;
+        charW[s * CHAR_N + c] = w > 0 && w < 200 ? w : POPUP_PX[s] * 0.6;
+      }
+    }
+    ctx.font = prev;
+    charReady = true;
+  }
+
+  /** Upward drift of a popup at age t (same curve drawPopup uses). */
+  function driftAt(t: number, life: number): number {
+    const u = t >= life ? 1 : t <= 0 ? 0 : t / life;
+    return FX.popupDrift * (1 - (1 - u) * (1 - u));
+  }
+
+  /** Unscaled width of a popup text incl. its outline (u). Allocation-free. */
+  function textWidth(text: string, sz: number): number {
+    const px = POPUP_PX[sz];
+    let w = 0;
+    for (let i = 0; i < text.length; i++) {
+      const c = text.charCodeAt(i) - 32;
+      w += charReady && c >= 0 && c < CHAR_N ? charW[sz * CHAR_N + c] : px * 0.62;
+    }
+    return w + POPUP_STROKE[sz];
+  }
+
+  /** Portrait fit: scale so the popup is at most 45% of the view wide. */
+  function fitScale(w: number): number {
+    const v = state.view;
+    if (!(v.cssH > v.cssW)) return 1;
+    const max = v.viewW * PORTRAIT_MAX_W;
+    return w > max && w > 0 ? max / w : 1;
+  }
+
+  /**
+   * Would a new popup (size sz, box hw x hh) based at (x, y) cross a live popup while that one is
+   * still clearly visible? Both boxes are compared now and at the end of the older one's visible
+   * life (a young popup drifts up faster and catches up; different sizes follow the camera by
+   * different amounts), and a vertical crossing in between counts too. hw / hh: the new popup's
+   * half box at rest (portrait fit applied); padded here for its 1.2x pop.
+   */
+  function hitsLive(x: number, y: number, sz: number, hw: number, hh: number, camNow: number): boolean {
+    const spd = state.run.speed > 0 ? state.run.speed : 0;
+    const fN = POPUP_FOLLOW[sz];
+    const lifeN = sz === 2 ? FX.popupLifeBig : FX.popupLife;
+    for (let i = 0; i < NPOP; i++) {
+      const q = pops[i];
+      if (!q.on) continue;
+      const tEnd = q.life * POPUP_VISIBLE;
+      if (q.t >= tEnd) continue;
+      // Both popping: 1.1 each; against a settled popup the new one gets its full 1.2 overshoot.
+      const popping = q.t < FX.popupScaleT;
+      const kn = popping ? LANE_PAD : POP_OVER;
+      const kq = fitScale(q.w) * (popping ? LANE_PAD : 1);
+      const sw = hw * kn + q.w * 0.5 * kq;
+      const sh = hh * kn + POPUP_HH[q.size] * kq;
+      const fq = POPUP_FOLLOW[q.size];
+      const tau = tEnd - q.t;
+      const dx0 = q.x + (camNow - q.cam0) * fq - x;
+      const dx1 = dx0 + spd * tau * (fq - fN);
+      const g0 = q.y - driftAt(q.t, q.life) - y;
+      const g1 = q.y - driftAt(tEnd, q.life) - (y - driftAt(tau, lifeN));
+      const x0 = dx0 < sw && dx0 > -sw;
+      const x1 = dx1 < sw && dx1 > -sw;
+      if (x0 && g0 < sh && g0 > -sh) return true;
+      if (x1 && g1 < sh && g1 > -sh) return true;
+      if ((x0 || x1) && (g0 < 0) !== (g1 < 0)) return true;
+    }
+    return false;
   }
 
   /* ------------------------------------------------------------------ */
@@ -677,10 +851,20 @@ export function createFx(state: GameState, crng: Rng): FxApi {
     const u = t / p.life;
     let a = u > 0.6 ? 1 - (u - 0.6) / 0.4 : 1;
     if (reduced && t < 0.12) a *= t / 0.12;
-    const drift = FX.popupDrift * (1 - (1 - u) * (1 - u));
-    const x = p.x + (camNow - p.cam0) * POPUP_FOLLOW[p.size];
-    const y = p.y - drift - p.lift;
     if (sc <= 0.01 || a <= 0) return;
+    sc *= fitScale(p.w);
+    const drift = driftAt(t, p.life);
+    let x = p.x + (camNow - p.cam0) * POPUP_FOLLOW[p.size];
+    let y = p.y - drift;
+    // Keep the whole text inside the view (world transform: screen = world - camX, + offsetY).
+    const v = state.view;
+    const cam = state.cam;
+    const hw = p.w * 0.5 * sc;
+    const lo = camNow + cam.shakeX + v.safeL + EDGE + hw;
+    const hi = camNow + cam.shakeX + v.viewW - v.safeR - EDGE - hw;
+    if (lo <= hi) x = x < lo ? lo : x > hi ? hi : x;
+    const top = v.safeT + HUD_TOP - v.offsetY - cam.shakeY + POPUP_HH[p.size] * sc;
+    if (y < top) y = top;
     ctx.save();
     ctx.translate(x, y);
     ctx.scale(sc, sc);
@@ -717,20 +901,55 @@ export function createFx(state: GameState, crng: Rng): FxApi {
       if (n > NP) n = NP;
       const k = kindCode(kind);
       const h = hue === undefined ? -1 : hue;
-      for (let i = 0; i < n; i++) spawnOne(k, x, y, h, i, n);
+      // TOTOTO TIME smash (gameplay bursts poof + star at a hazard it just flagged 'smashed').
+      let mat = M_NONE;
+      if (state.fever.active && (k === K_POOF || k === K_STAR)) mat = smashedMaterialAt(x);
+      const bias = mat !== M_NONE ? SMASH_BIAS : 0;
+      for (let i = 0; i < n; i++) {
+        const p = spawnOne(k, x, y, h, i, n);
+        p.vx += bias;
+      }
+      if (k === K_POOF && mat !== M_NONE) spawnDebris(mat, x, y);
     },
 
     popup(x: number, y: number, text: string, color: string, size: PopupSize): void {
       const sz = sizeCode(size);
-      // Stack on top of fresh popups that spawned nearby so texts never overlap.
-      let lift = 0;
-      for (let i = 0; i < NPOP; i++) {
-        const q = pops[i];
-        if (!q.on || q.t > 0.35) continue;
-        const dx = q.x - x;
-        const dy = q.y - q.lift - (y - lift);
-        if (dx < 90 && dx > -90 && dy < 26 && dy > -26) lift += sz === 2 || q.size === 2 ? 34 : 24;
+      const w = textWidth(text, sz);
+      // Lane candidates: free lanes (lowest first), then taken lanes (handed out longest ago first).
+      let nFree = 0;
+      for (let l = 0; l < LANES; l++) if (time - laneT[l] >= LANE_HOLD) laneOrd[nFree++] = l;
+      let nOrd = nFree;
+      for (let l = 0; l < LANES; l++) {
+        if (time - laneT[l] >= LANE_HOLD) continue;
+        let j = nOrd++;
+        while (j > nFree && laneT[laneOrd[j - 1]] > laneT[l]) {
+          laneOrd[j] = laneOrd[j - 1];
+          j--;
+        }
+        laneOrd[j] = l;
       }
+      // Lanes go up from the anchor; near the top of the view they stack downward instead.
+      const v = state.view;
+      const k = fitScale(w);
+      const hw = w * 0.5 * k;
+      const hh = POPUP_HH[sz] * k;
+      const top = v.safeT + HUD_TOP - v.offsetY + hh * POP_OVER;
+      const dir = y - (LANES - 1) * LANE_DY < top ? 1 : -1;
+      const camNow = state.cam.x;
+      let lane = laneOrd[0];
+      let by = y + dir * lane * LANE_DY;
+      if (by < top) by = top;
+      for (let j = 0; j < LANES; j++) {
+        const l = laneOrd[j];
+        let cy = y + dir * l * LANE_DY;
+        if (cy < top) cy = top;
+        if (!hitsLive(x, cy, sz, hw, hh, camNow)) {
+          lane = l;
+          by = cy;
+          break;
+        }
+      }
+      laneT[lane] = time;
       let p = pops[popCursor];
       for (let n = 0; n < NPOP; n++) {
         const i = (popCursor + n) % NPOP;
@@ -743,14 +962,15 @@ export function createFx(state: GameState, crng: Rng): FxApi {
       }
       p.on = true;
       p.x = x;
-      p.y = y;
-      p.cam0 = state.cam.x;
+      p.y = by;
+      p.cam0 = camNow;
       p.text = text;
       p.color = color;
       p.size = sz;
       p.t = 0;
       p.life = sz === 2 ? FX.popupLifeBig : FX.popupLife;
-      p.lift = lift;
+      p.lane = lane;
+      p.w = w;
     },
 
     ring(kind: RingKind, x: number, y: number, hue: number): void {
@@ -924,6 +1144,7 @@ export function createFx(state: GameState, crng: Rng): FxApi {
 
     drawWorld(ctx: CanvasRenderingContext2D): void {
       const reduced = state.save.reducedMotion;
+      if (!charReady) measureChars(ctx);
       ctx.lineJoin = 'round';
       ctx.lineCap = 'round';
       for (let i = 0; i < NR; i++) {
@@ -1010,6 +1231,7 @@ export function createFx(state: GameState, crng: Rng): FxApi {
       for (let i = 0; i < NP; i++) parts[i].on = false;
       for (let i = 0; i < NPOP; i++) pops[i].on = false;
       for (let i = 0; i < NR; i++) rings[i].on = false;
+      laneT.fill(-1e9);
       activeParticles = 0;
       flashA = 0;
       feverVis = 0;

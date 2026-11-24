@@ -29,6 +29,13 @@
  *  - Font: FONT_STACK, bold, light fill over a 4 u (x K) dark stroke.
  *  - Reduced motion (state.save.reducedMotion): transitions become fades, nothing flashes or
  *    bounces (logo letters glow on the beat instead of hopping).
+ *  - Tutorial pills (slam / boing / hold / drum) sit above their anchor with a tail pointing at it,
+ *    inside the safe view (8 CSS px), below the HUD, never over Toto or his chain counter (parked
+ *    beside him when there is no room above). SLAM / BOING anchored on Toto follow him.
+ *  - TOTOTO TIME entry banner from fever.introT (pop 0 -> 1.3 -> 1, fade out by 1.25 s, white
+ *    flash for 0.08 s; fade only in reduced motion); the chain counter hides for its first 0.6 s.
+ *  - Tall portrait (cssH / cssW > 1.3): pause panel + game-over card centred at 52 % of the height.
+ *    The card never covers the top-right sound button. The rotate hint shows once per page load.
  */
 import {
   CHAIN_HUES,
@@ -194,11 +201,17 @@ export function createUI(opts: UiOptions): UiApi {
   const tutSlamKey = richLine(UI_TEXT.tutSlamKey, COL.ink);
   const tutBoingTouch = richLine(UI_TEXT.tutBoing, COL.ink);
   const tutBoingKey = richLine(UI_TEXT.tutBoingKey, COL.ink);
+  const tutHoldTouch = richLine(UI_TEXT.tutHold, COL.ink);
+  const tutHoldKey = richLine(UI_TEXT.tutHoldKey, COL.ink);
+  const tutDrum = richLine(UI_TEXT.tutDrum, COL.ink);
   // On the light tutorial pill keywords need darker tones to read well.
   darkenKeywords(tutSlamTouch);
   darkenKeywords(tutSlamKey);
   darkenKeywords(tutBoingTouch);
   darkenKeywords(tutBoingKey);
+  darkenKeywords(tutHoldTouch);
+  darkenKeywords(tutHoldKey);
+  darkenKeywords(tutDrum);
 
   /* ---------------- logo ---------------- */
   const logoText = UI_TEXT.logo;
@@ -250,6 +263,8 @@ export function createUI(opts: UiOptions): UiApi {
   let sT = 0;
   let sB = 0;
   let portrait = false;
+  /** Tall portrait (cssH / cssW > 1.3): cards centre at 52 % of the height, in thumb reach. */
+  let tall = false;
   let heroX = 167;
   let offsetY = 0;
   let domW = 0;
@@ -280,6 +295,9 @@ export function createUI(opts: UiOptions): UiApi {
   let F_TITLE_LBL = '';
   let F_GOAL_TITLE = '';
   let F_FEVER = '';
+  let F_FEVER_BIG = '';
+  let feverBigSize = 60;
+  let feverBigGrad: CanvasGradient | null = null;
   // card (scaled by ck)
   let F_CAPTION = '';
   let F_CARD_LABEL = '';
@@ -447,6 +465,7 @@ export function createUI(opts: UiOptions): UiApi {
     sT = view.safeT;
     sB = view.safeB;
     portrait = view.portrait;
+    tall = view.cssH > view.cssW * 1.3;
     heroX = view.heroX;
     offsetY = view.offsetY;
     viewVersion = view.version;
@@ -509,9 +528,13 @@ export function createUI(opts: UiOptions): UiApi {
     const bottomLimit = vh - sB - M * 0.6;
     const cardLeftFull = vw / 2 - (cardW * K) / 2;
     if (!standalone && cardLeftFull < sL + domW) topLimit = sT + domH + 6 * K;
+    // never under / over the top-right sound button
+    const btn = Math.max(minBtn, 46 * K);
+    const cardRightMax = Math.max(vw / 2 + (cardW * K) / 2, portrait ? 0 : heroX + 58 + cardW * K);
+    if (cardRightMax > vw - sR - M - btn - 6 * K) topLimit = Math.max(topLimit, sT + 16 * K + btn);
     let bottom = bottomLimit;
     const aboveToto = GROUND_Y + offsetY - 150;
-    if (portrait && aboveToto - topLimit >= cardBaseH(base) * K && aboveToto < bottom) bottom = aboveToto;
+    if (portrait && !tall && aboveToto - topLimit >= cardBaseH(base) * K && aboveToto < bottom) bottom = aboveToto;
     const avail = bottom - topLimit;
     cCopyH = 46;
     ck = K;
@@ -536,7 +559,8 @@ export function createUI(opts: UiOptions): UiApi {
       const maxLeft = vw - sR - M * 0.6 - cardW * ck;
       if (cardX < minLeft) cardX = minLeft < maxLeft ? minLeft : Math.max(cardX, maxLeft);
     }
-    let y = (topLimit + bottom) / 2 - (cardH * ck) / 2;
+    let y = (tall ? vh * 1.04 : topLimit + bottom) / 2 - (cardH * ck) / 2;
+    if (y > bottom - cardH * ck) y = bottom - cardH * ck;
     if (y < topLimit) y = topLimit;
     cardY = y;
     buildCardFonts();
@@ -566,7 +590,8 @@ export function createUI(opts: UiOptions): UiApi {
     }
     const left = vw / 2 - w / 2;
     if (!standalone && left < sL + domW) topLimit = Math.max(topLimit, sT + domH + 6 * K);
-    let y = (topLimit + bottomLimit) / 2 - h / 2;
+    let y = (tall ? vh * 1.04 : topLimit + bottomLimit) / 2 - h / 2;
+    if (y > bottomLimit - h) y = bottomLimit - h;
     if (y < topLimit) y = topLimit;
     pnX = left;
     pnY = y;
@@ -750,12 +775,27 @@ export function createUI(opts: UiOptions): UiApi {
       feverCharW[i] = ctx.measureText(feverChars[i]).width;
       feverLblW += feverCharW[i];
     }
+    // TOTOTO TIME entry banner: even its 1.3x overshoot (plus outline) stays within 86 % of the width
+    ctx.font = fontPx(100, '900');
+    const fw100 = ctx.measureText(UI_TEXT.fever).width;
+    feverBigSize = Math.min(80 * K, (vw * 0.86 * 100) / (1.3 * (fw100 + 15)));
+    F_FEVER_BIG = fontPx(feverBigSize, '900');
+    const fHalf = (fw100 * feverBigSize) / 200;
+    feverBigGrad = ctx.createLinearGradient(-fHalf, 0, fHalf, 0);
+    for (let i = 0; i < CHAIN_HUES.length; i++) feverBigGrad.addColorStop(i / (CHAIN_HUES.length - 1), CHAIN_HUES[i]);
     measureLogo(ctx);
-    ctx.font = F_HOW;
-    how1W = measureSegs(ctx, how1);
-    how2FullW = measureSegs(ctx, how2Full);
-    how2aW = measureSegs(ctx, how2a);
-    how2bW = measureSegs(ctx, how2b);
+    // how-to lines: shrink the font when even the wrapped lines would not fit the panel (narrow phones)
+    for (let pass = 0; pass < 2; pass++) {
+      ctx.font = F_HOW;
+      how1W = measureSegs(ctx, how1);
+      how2FullW = measureSegs(ctx, how2Full);
+      how2aW = measureSegs(ctx, how2a);
+      how2bW = measureSegs(ctx, how2b);
+      const need = Math.max(how1W, how2aW, how2bW);
+      const room = vw - sL - sR - 2 * M - 36 * K;
+      if (need <= room) break;
+      F_HOW = fontPx((18 * K * room) / need, '700');
+    }
     ctx.font = F_START;
     tStartW = ctx.measureText(UI_TEXT.start).width + 56 * K;
     tStartH = 46 * K;
@@ -1102,7 +1142,8 @@ export function createUI(opts: UiOptions): UiApi {
       const bestNow = state.save.best > 0 && r.score > state.save.best;
       if (bestNow && !lastBestHud) bestHudT = 0;
       lastBestHud = bestNow;
-      if (mode === 'playing' && portrait && hintState === 0) {
+      if (mode === 'playing' && portrait && hintState === 0 && !portraitHintShown) {
+        portraitHintShown = true;
         hintState = 1;
         hintT = 0;
       }
@@ -1116,9 +1157,11 @@ export function createUI(opts: UiOptions): UiApi {
     if (magnetPopT < 99) magnetPopT += dt;
     if (feverBurstT < 99) feverBurstT += dt;
     if (bestHudT < 99) bestHudT += dt;
-    if (hintState === 1 && mode === 'playing') {
-      hintT += dt;
-      if (hintT >= UI.portraitHintDur) hintState = 2;
+    if (hintState === 1) {
+      if (mode === 'playing') hintT += dt;
+      // once per page load: a run that ends (or a rotation) mid-hint does not bring it back
+      const over = hintT >= UI.portraitHintDur || state.run.time > UI.portraitHintDur + 2;
+      if (over || !portrait || mode === 'gameover' || mode === 'title') hintState = 2;
     }
   }
 
@@ -1745,6 +1788,43 @@ export function createUI(opts: UiOptions): UiApi {
     }
   }
 
+  /** TOTOTO TIME entry banner, from fever.introT (real s since the fever started). */
+  function drawFeverIntro(ctx: CanvasRenderingContext2D, state: ReadState): void {
+    const it = state.fever.introT;
+    if (!state.fever.active || !(it < 1.25)) return;
+    const reduced = state.save.reducedMotion;
+    if (!reduced && it < 0.08) {
+      ctx.globalAlpha = 0.5 * (1 - it / 0.08);
+      ctx.fillStyle = COL.white;
+      ctx.fillRect(0, 0, vw, vh);
+    }
+    let sc = 1;
+    let alpha = it > 1 ? (1.25 - it) / 0.25 : 1;
+    if (reduced) alpha = Math.min(alpha, it / 0.17);
+    else if (it < 0.17) sc = 1.3 * easeOutCubic(it / 0.17);
+    else if (it < 0.25) sc = 1.3 - (0.3 * (it - 0.17)) / 0.08;
+    ctx.globalAlpha = clamp01(alpha);
+    if (sc > 0.02) {
+      const S = feverBigSize;
+      const txt = UI_TEXT.fever;
+      ctx.save();
+      ctx.translate(vw / 2, vh * 0.3);
+      ctx.scale(sc, sc);
+      ctx.font = F_FEVER_BIG;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ink(ctx, S * 0.15);
+      ctx.fillStyle = COL.ink;
+      ctx.strokeText(txt, 0, S * 0.07);
+      ctx.fillText(txt, 0, S * 0.07);
+      ctx.strokeText(txt, 0, 0);
+      ctx.fillStyle = feverBigGrad !== null ? feverBigGrad : COL.gold;
+      ctx.fillText(txt, 0, 0);
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+  }
+
   function heroScreenY(state: ReadState): number {
     const h = state.hero;
     return h.prevY + (h.y - h.prevY) * state.clock.alpha + offsetY;
@@ -1752,6 +1832,7 @@ export function createUI(opts: UiOptions): UiApi {
 
   function drawChain(ctx: CanvasRenderingContext2D, state: ReadState, a: number): void {
     const chain = state.run.chain;
+    if (state.fever.active && state.fever.introT < 0.6) return; // the TOTOTO TIME banner owns the moment
     let alpha = a;
     let lift = 0;
     let value = chain;
@@ -1862,23 +1943,103 @@ export function createUI(opts: UiOptions): UiApi {
         ctx.fillText(UI_TEXT.tutTap, 0, 2 * K);
       }
     } else {
-      const segs = tu.prompt === 'slam' ? (key ? tutSlamKey : tutSlamTouch) : key ? tutBoingKey : tutBoingTouch;
+      // Pill prompts: SLAM / BOING ride on Toto, JUMP ON THE DRUM / HOLD point at their drum / mound.
+      const pr: string = tu.prompt;
+      const hold = pr === 'hold';
+      const segs =
+        pr === 'slam'
+          ? key
+            ? tutSlamKey
+            : tutSlamTouch
+          : pr === 'boing'
+            ? key
+              ? tutBoingKey
+              : tutBoingTouch
+            : hold
+              ? key
+                ? tutHoldKey
+                : tutHoldTouch
+              : tutDrum;
       ctx.font = F_TUT;
       const tw = tutSegWidth(ctx, segs);
       const iconR = 13 * K;
       const bw = tw + iconR * 2 + 40 * K;
       const bh = 44 * K;
-      if (lx < sL + M + bw / 2) lx = sL + M + bw / 2;
-      if (lx > vw - sR - M - bw / 2) lx = vw - sR - M - bw / 2;
+      const tail = 12 * K;
+      const edge = 8 / s + 0.02 * bw; // 8 CSS px + the pulse
+      const h = state.hero;
+      const hy = heroScreenY(state);
+      const onHero = tu.promptX === h.x;
+      if (onHero) lx = heroX;
+      const ax = lx;
+      const overHero = lx - bw / 2 < heroX + 40 && lx + bw / 2 > heroX - 40;
+      // Lowest body bottom that keeps the tail off Toto's head and the bubble off his chain counter.
+      let clear = hy - 74 - tail;
+      if ((state.run.chain > 0 || chainFadeT < 0.4) && clear > hy - 84 - 18 * K) clear = hy - 84 - 18 * K;
+      // The bubble sits above its anchor (the tail tip), never over Toto, never under the HUD.
+      // (The golden-mango BOING sign is centred under the mango instead.)
+      let tailDir = onHero || pr !== 'boing' ? 1 : 0; // 1 = down, -1 = left (parked beside Toto)
+      let bot = tailDir > 0 ? (onHero && pr === 'slam' ? hy + tu.promptY - h.y : ly) - tail : ly + bh / 2;
+      if (overHero && bot > clear) bot = clear;
+      let cy = bot - bh / 2;
+      let minY = Math.max(sT + edge, hudIconsY + 20 * K, gy + gH + 8 * K);
+      if (state.banner.text !== '' && state.banner.t < state.banner.dur) minY = Math.max(minY, bannerY + 30 * K);
+      if (cy - bh / 2 < minY) {
+        cy = minY + bh / 2;
+        if (overHero && cy + bh / 2 > clear) {
+          // too high to fit above Toto (landscape, after a drum bounce): park beside him
+          lx = heroX + 44 + tail + bw / 2;
+          cy = Math.max(cy, hy - 34);
+          tailDir = -1;
+        }
+      }
+      if (cy > vh - sB - edge - bh / 2) cy = vh - sB - edge - bh / 2;
+      if (lx < sL + edge + bw / 2) lx = sL + edge + bw / 2;
+      if (lx > vw - sR - edge - bw / 2) lx = vw - sR - edge - bw / 2;
       const sc = reduced ? 1 : 1 + 0.04 * pulse;
       if (reduced) ctx.globalAlpha = a * fade * (0.7 + 0.3 * pulse);
-      ctx.translate(lx, ly);
+      ctx.translate(lx, cy);
       ctx.scale(sc, sc);
-      sticker(ctx, -bw / 2, -bh / 2, bw, bh, bh / 2, 3 * K, 'rgba(248,250,252,0.94)', COL.ink, 3 * K);
-      const dir = tu.prompt === 'slam' ? 1 : -1;
-      const bob = reduced ? 0 : (pulse - 0.5) * 4 * K * dir;
+      // shadow, then body + tail as one path
+      const tx = Math.max(-bw / 2 + bh / 2, Math.min(bw / 2 - bh / 2, ax - lx));
+      for (let pass = 0; pass < 2; pass++) {
+        const d = pass === 0 ? 3 * K : 0;
+        rrect(ctx, -bw / 2, -bh / 2 + d, bw, bh, bh / 2);
+        if (tailDir > 0) {
+          ctx.moveTo(tx - 9 * K, bh / 2 - 1 + d);
+          ctx.lineTo(tx, bh / 2 + tail + d);
+          ctx.lineTo(tx + 9 * K, bh / 2 - 1 + d);
+        } else if (tailDir < 0) {
+          ctx.moveTo(-bw / 2 + 4 * K, d - 9 * K);
+          ctx.lineTo(-bw / 2 - tail, d);
+          ctx.lineTo(-bw / 2 + 4 * K, d + 9 * K);
+        }
+        ctx.fillStyle = pass === 0 ? COL.ink : 'rgba(248,250,252,0.94)';
+        ctx.fill();
+      }
+      ctx.lineWidth = 3 * K;
+      ctx.strokeStyle = COL.ink;
+      ctx.stroke();
       const ix = -bw / 2 + 16 * K + iconR;
-      iconArrow(ctx, ix, bob, iconR, dir, tu.prompt === 'slam' ? COL.red : COL.green);
+      if (hold) {
+        // press-and-hold ring: fills over a 0.8 s loop (full and steady in reduced motion)
+        const q = reduced ? 1 : (pt % 0.8) / 0.8;
+        circle(ctx, ix, 0, iconR * 0.8);
+        ctx.lineWidth = iconR * 0.5;
+        ctx.strokeStyle = 'rgba(3,7,18,0.18)';
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(ix, 0, iconR * 0.8, -Math.PI / 2, -Math.PI / 2 + TAU * q);
+        ctx.strokeStyle = '#D97706';
+        ctx.stroke();
+        circle(ctx, ix, 0, iconR * 0.3);
+        ctx.fillStyle = COL.ink;
+        ctx.fill();
+      } else {
+        const dir = pr === 'boing' ? -1 : 1;
+        const bob = reduced ? 0 : (pulse - 0.5) * 4 * K * dir;
+        iconArrow(ctx, ix, bob, iconR, dir, pr === 'slam' ? COL.red : COL.green);
+      }
       ctx.font = F_TUT;
       ctx.textBaseline = 'middle';
       drawSegs(ctx, segs, ix + iconR + 10 * K, 1.5 * K, false);
@@ -2026,6 +2187,7 @@ export function createUI(opts: UiOptions): UiApi {
 
   function drawPortraitHint(ctx: CanvasRenderingContext2D, state: ReadState): void {
     if (hintState !== 1 || state.mode !== 'playing') return;
+    if (state.fever.active && state.fever.introT < 1.25) return; // the TOTOTO TIME banner's spot
     const t = hintT;
     const dur = UI.portraitHintDur;
     let alpha = 1;
@@ -2524,6 +2686,7 @@ export function createUI(opts: UiOptions): UiApi {
           drawChain(ctx, state, hudAlpha);
           drawTutorial(ctx, state, hudAlpha);
           drawBanner(ctx, state, hudAlpha);
+          drawFeverIntro(ctx, state);
         }
       }
       if (mode === 'playing') {
@@ -2561,6 +2724,9 @@ export function createUI(opts: UiOptions): UiApi {
   };
 }
 
+/** The portrait "Rotate for a wider view" pill shows once per page load (survives remounts). */
+let portraitHintShown = false;
+
 /** Order of the pause-menu rows (indices into the button array). */
 const PAUSE_ROW_ORDER: ReadonlyArray<number> = [I_RESUME, I_RESTART, I_SOUND, I_MOTION];
 
@@ -2571,5 +2737,6 @@ function darkenKeywords(segs: Seg[]): void {
     if (sg.color === COL.gold) sg.color = '#D97706';
     else if (sg.color === COL.red) sg.color = '#E11D48';
     else if (sg.color === COL.green) sg.color = '#15803D';
+    else if (sg.color === COL.warm) sg.color = '#C2410C';
   }
 }

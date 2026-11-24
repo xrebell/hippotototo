@@ -7,6 +7,7 @@
  *
  * How: typescript.transpileModule each file -> CommonJS/ES2019, wrap each in a function inside a
  * tiny require registry, IIFE, boot require('index').createGame(canvas, { standalone: true }).
+ * Whitespace between tokens is dropped (line breaks kept, token stream re-verified; see squeeze()).
  * No new dependencies: uses the repo's own `typescript`.
  *
  * Fails (exit 1) on transpile diagnostics, an external URL in the output, or > 400 KB.
@@ -44,6 +45,77 @@ const compilerOptions = {
   sourceMap: false,
 };
 
+/**
+ * Strip leading indentation (TS emits 4-space indents: ~30% of the bytes). Only when the module
+ * has no template literal and no backslash line-continuation, the only places where leading
+ * whitespace can be string content. (Fallback for squeeze().)
+ */
+function compact(code) {
+  if (code.includes('`') || /\\\r?\n/.test(code)) return code;
+  return code.replace(/^[ \t]+/gm, '');
+}
+
+/**
+ * Token-level whitespace removal (~11% smaller than compact()). Re-emits the module's tokens as
+ * the TypeScript parser sees them (strings, template parts and regexes stay byte-identical):
+ * a gap that held a line break becomes one '\n' (so ASI / restricted productions are unchanged),
+ * any other gap disappears unless the two neighbours would otherwise fuse (`a in b`, `a - -b`,
+ * `1 .x`, `/ /re/`, `<!`, `-->`). Self-checking: the result is re-parsed and must yield exactly
+ * the same token sequence (kind + text); otherwise the module falls back to compact().
+ */
+function leafTokens(code, file) {
+  const sf = ts.createSourceFile(file.replace(/\.ts$/, '.js'), code, ts.ScriptTarget.ES2019, true, ts.ScriptKind.JS);
+  const out = [];
+  const walk = (node) => {
+    const kids = node.getChildren(sf);
+    if (kids.length === 0) {
+      if (node.kind !== ts.SyntaxKind.EndOfFileToken && node.end > node.getStart(sf)) out.push({ kind: node.kind, start: node.getStart(sf), end: node.end, text: node.getText(sf) });
+      return;
+    }
+    for (const k of kids) walk(k);
+  };
+  walk(sf);
+  return { toks: out, diags: sf.parseDiagnostics ? sf.parseDiagnostics.length : 0 };
+}
+
+const ID_CHAR = /[A-Za-z0-9_$\\\u0080-\uffff]/;
+function needsSpace(a, b) {
+  const x = a[a.length - 1];
+  const y = b[0];
+  if (ID_CHAR.test(x) && ID_CHAR.test(y)) return true;
+  if (y === '.' && /^[0-9]/.test(a)) return true;
+  if ((x === '+' || x === '-') && y === x) return true;
+  if (x === '/' && (y === '/' || y === '*')) return true;
+  if (x === '<' && y === '!') return true;
+  if (x === '-' && y === '>') return true;
+  return false;
+}
+
+function squeeze(code, file) {
+  const src = leafTokens(code, file);
+  if (src.diags) return compact(code);
+  let out = '';
+  let prevEnd = 0;
+  let prev = '';
+  for (const t of src.toks) {
+    const gap = code.slice(prevEnd, t.start);
+    if (out) {
+      if (/[\n\r\u2028\u2029]/.test(gap)) out += '\n';
+      else if (gap && needsSpace(prev, t.text)) out += ' ';
+    }
+    out += t.text;
+    prevEnd = t.end;
+    prev = t.text;
+  }
+  const back = leafTokens(out, file);
+  const same = !back.diags && back.toks.length === src.toks.length && back.toks.every((t, i) => t.kind === src.toks[i].kind && t.text === src.toks[i].text);
+  if (!same) {
+    console.warn(`[build-standalone] ${file}: token check failed after whitespace removal; using indentation strip only`);
+    return compact(code);
+  }
+  return out;
+}
+
 const modules = files.map((file) => {
   const source = readFileSync(join(SRC_DIR, file), 'utf8');
   const result = ts.transpileModule(source, { compilerOptions, fileName: file, reportDiagnostics: true });
@@ -52,18 +124,9 @@ const modules = files.map((file) => {
     const text = diags.map((d) => `${file}: ${ts.flattenDiagnosticMessageText(d.messageText, '\n')}`).join('\n');
     fail(`transpile errors:\n${text}`);
   }
-  return { name: file.slice(0, -3), code: compact(result.outputText.replace(/\/\/# sourceMappingURL=.*$/gm, '').trim()) };
+  const js = result.outputText.replace(/\/\/# sourceMappingURL=.*$/gm, '').trim();
+  return { name: file.slice(0, -3), code: squeeze(js, file) };
 });
-
-/**
- * Strip leading indentation (TS emits 4-space indents: ~30% of the bytes). Only when the module
- * has no template literal and no backslash line-continuation, the only places where leading
- * whitespace can be string content.
- */
-function compact(code) {
-  if (code.includes('`') || /\\\r?\n/.test(code)) return code;
-  return code.replace(/^[ \t]+/gm, '');
-}
 
 const defs = modules
   .map((m) => `${JSON.stringify(m.name)}: function (module, exports, require) {\n${m.code}\n}`)

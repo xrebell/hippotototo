@@ -1,10 +1,11 @@
 /**
  * Render-private helpers. Owner: ART engineer.
  *
- *  - Colour maths runs at INIT time only (createRenderer): every colour the renderer needs while
+ *  - Colour maths runs at INIT time (createRenderer): every colour the renderer needs while
  *    the day phases cross-fade is precomputed into string tables indexed by
  *    `phase.index * (PHASE_STEPS + 1) + round(phase.blend * PHASE_STEPS)` so the per-frame path
- *    only does array lookups (no string building, no allocation).
+ *    only does array lookups (no string building, no allocation). The one exception is the
+ *    TOTOTO TIME sky tint, mixed with mixHex() only on a sky-gradient cache miss (render.ts).
  *  - Path helpers (rounded rect, star, ellipse underside crescent) never allocate.
  */
 import { PHASES } from './config';
@@ -33,7 +34,10 @@ function to2(n: number): string {
   return s.length < 2 ? '0' + s : s;
 }
 
-/** Mix two #RRGGBB colours (t = 0 -> a, 1 -> b). Init-time only. */
+/**
+ * Mix two #RRGGBB colours (t = 0 -> a, 1 -> b). Allocates: init time, or a cache miss that builds
+ * a new gradient anyway (render.ts fever sky), never on the steady per-frame path.
+ */
 export function mixHex(a: string, b: string, t: number): string {
   let out = '#';
   for (let i = 0; i < 3; i++) {

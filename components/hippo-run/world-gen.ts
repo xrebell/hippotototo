@@ -13,8 +13,11 @@
  *  - Every run starts with the same structure (seeded fillers vary): opening (0–4.9 s, hazard-free:
  *    hop arc at 1.2 s, drum at 2.6 s) then the lesson chunk: first bush ~5.5 s (TAP prompt +
  *    teaching freeze on a first-ever run), drum pair ~9 s (SLAM prompt), golden mango on the BOING
- *    line ~14 s. The course never depends on firstRun, so same seed + same inputs = same run.
- *  - Selection: forced breather (every 4 hazard chunks, 5 after 500 m, and right after TOTOTO TIME)
+ *    line ~14 s. Returning players (save.tutorialSeen, read once at reset) skip the BOING line and
+ *    the filler after the drum pair: normal fill starts ~3.5 s earlier. The course is a pure
+ *    function of seed + that flag, so same seed + same save + same inputs = same run.
+ *  - Selection: forced breather (every 4 hazard chunks — chunks with a hazard type; 5 after 500 m —
+ *    and once right after TOTOTO TIME)
  *    -> forced solo intro for a newly unlocked hazard type -> tier by distance weights -> weighted
  *    pick among eligible templates excluding the last 2 ids -> variants (bush<->mound swap, +/-6%
  *    jitter on optional drums, optional golden mango) -> rest gap.
@@ -26,7 +29,6 @@ import {
   GEN,
   GOLDEN,
   GROUND_Y,
-  HITBOX,
   HORNBILL,
   INTRO_TEMPLATE,
   LOG,
@@ -43,6 +45,7 @@ import {
 } from './config';
 import type { DeathCause, Entity, EntityKind, GameState, Services, TemplateId } from './types';
 import { clamp, lerp, speedAt } from './state';
+import { insetWFracFor } from './geom';
 import type { SimCtx } from './world-sim';
 import { distanceAt, kindW, spawnEntity } from './world-sim';
 import type { ArcKind } from './hero';
@@ -151,6 +154,8 @@ export function createGenerator(state: GameState, sv: Services, sim: SimCtx): Co
   let pickupKind: EntityKind | '' = '';
   let chunkHasLog = false;
   let chunkHasPit = false;
+  /** save.tutorialSeen at reset: the lesson chunk skips its BOING line. */
+  let returning = false;
 
   /* ---------------- fairness records (absolute) ---------------- */
   const rqTake: number[] = [];
@@ -308,7 +313,7 @@ export function createGenerator(state: GameState, sv: Services, sim: SimCtx): Co
   }
 
   function hitHalf(kind: EntityKind): number {
-    return (kindW(kind) * (1 - HITBOX.insetWFrac)) / 2;
+    return (kindW(kind) * (1 - insetWFracFor(kind))) / 2;
   }
 
   /** Static ground hazard centred at t with its canonical (centred, full) required jump. */
@@ -447,7 +452,7 @@ export function createGenerator(state: GameState, sv: Services, sim: SimCtx): Co
           sim.tutBushSerial = be.serial;
           sim.tutBushX = be.x + be.w / 2;
           sim.tutBushTop = be.y;
-          sim.tutBushLeft = be.x + (be.w * HITBOX.insetWFrac) / 2;
+          sim.tutBushLeft = be.x + (be.w * insetWFracFor('bush')) / 2;
         }
         // seeded filler (no hazards)
         if (rng.next() < 0.5) melonSlamAt(2.4, false);
@@ -467,6 +472,9 @@ export function createGenerator(state: GameState, sv: Services, sim: SimCtx): Co
         exit(d2 + tm.tBoomOff);
         sim.tutSlamX0 = X(d1);
         sim.tutSlamX1 = X(d2);
+        // Returning players: no BOING line (and no filler before it). The chunk ends at the BOOM exit
+        // landing; with the rest gap the normal fill starts at ~11.4 s (first-ever run: ~16.4 s).
+        if (returning) return d2 + tm.tBoomOff;
         // seeded filler
         const fb = 6.6;
         const r = rng.int(0, 2);
@@ -648,15 +656,16 @@ export function createGenerator(state: GameState, sv: Services, sim: SimCtx): Co
       }
       /* ----- breathers ----- */
       case 'alleyDrums': {
+        // Six drums: a full chain 6 by plain bounces (x3 milestone at 5).
         const d = 0.4;
-        for (let k = 0; k < 4; k++) drum(d + k * BB);
+        for (let k = 0; k < 6; k++) drum(d + k * BB);
         arc('ontoDrum', d - tm.tOn, 0, DH, 0, F0, F1);
-        for (let k = 0; k < 3; k++) arc('bounce', d + k * BB, DH, DH, k + 1, F0, F1);
-        arc('bounce', d + 3 * BB, DH, 0, 4, F0, F1);
-        exit(d + 3 * BB + tm.tOff);
-        exit(d + 3 * BB + tm.tBoomOff);
-        if (wantGolden()) goldenOnFlight(PHYS.boomVy, d + 3 * BB, DH, 255, false);
-        return d + 3 * BB + tm.tOff;
+        for (let k = 0; k < 5; k++) arc('bounce', d + k * BB, DH, DH, (k + 1) % 5, F0, F1);
+        arc('bounce', d + 5 * BB, DH, 0, 1, F0, F1);
+        exit(d + 5 * BB + tm.tOff);
+        exit(d + 5 * BB + tm.tBoomOff);
+        if (wantGolden()) goldenOnFlight(PHYS.boomVy, d + 5 * BB, DH, 255, false);
+        return d + 5 * BB + tm.tOff;
       }
       case 'alleyMelons':
         melonSlamAt(0.6, false);
@@ -759,7 +768,11 @@ export function createGenerator(state: GameState, sv: Services, sim: SimCtx): Co
     pickupKind = '';
     const dM = distanceAt(Tc) / U_PER_M;
     const every = dM >= DIFFICULTY.breatherLateM ? DIFFICULTY.breatherEveryLate : DIFFICULTY.breatherEvery;
-    if (g.forceBreather || g.hazardChunks >= every) {
+    const shieldDue =
+      !g.shieldDone &&
+      Tc >= POWERUP.shieldFirstAt &&
+      (g.hazardChunks >= POWERUP.shieldFirstChunks || Tc >= POWERUP.shieldFirstLateAt);
+    if (g.forceBreather || g.hazardChunks >= every || shieldDue) {
       pickupKind = pickupDue(Tc);
       if (pickupKind !== '') return 'alleyPickup';
       const b = pickFrom(TEMPLATE_TIERS.breather, true);
@@ -887,7 +900,7 @@ export function createGenerator(state: GameState, sv: Services, sim: SimCtx): Co
       if (isBreather(id)) {
         g.hazardChunks = 0;
         g.forceBreather = false;
-      } else {
+      } else if (TPL_HAZ[id] !== 0) {
         g.hazardChunks++;
       }
       g.cursorT = Tc + dur + restGap(Tc + dur);
@@ -896,6 +909,7 @@ export function createGenerator(state: GameState, sv: Services, sim: SimCtx): Co
 
   function reset(): void {
     clearRecords();
+    returning = state.save.tutorialSeen;
     if (!sim.genEnabled) return;
     buildChunk('opening', 0);
     const dur = buildChunk('tutorial', LESSON_START);

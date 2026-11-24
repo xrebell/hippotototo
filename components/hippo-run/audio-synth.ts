@@ -327,7 +327,10 @@ function sfxBoing(e: SynthEnv, t: number): number {
 /**
  * Drum bounce at the chain note: sine with pitch drop x1.5 -> x1 in 40 ms, 260 ms decay, a
  * brighter octave strike partial and a 15 ms noise tick. BOOM adds a sub-octave sine, the
- * previous ladder step underneath (it counted 2 steps) and a low thump.
+ * previous ladder step underneath (it counted 2 steps) and a low thump, plus two layers that
+ * survive phone speakers (which reproduce almost nothing below ~300 Hz, i.e. none of the sub):
+ * a fixed 220 -> 180 Hz body knock (90 ms, half the sub's level) and a 25 ms band-passed noise
+ * "skin slap" at 1.8 kHz. Together they add one oscillator and one noise source per BOOM.
  */
 function sfxDrum(e: SynthEnv, t: number, chain: number, boom: boolean): number {
   const c = chain < 1 ? 1 : chain;
@@ -341,8 +344,13 @@ function sfxDrum(e: SynthEnv, t: number, chain: number, boom: boolean): number {
   noiseHit(e, e.sfx, false, 'bandpass', 3400, 2600, 1.2, t, 0.0008, lv * 0.32, t + 0.015);
   if (boom) {
     const sub = hz * 0.5;
+    const subLv = lv * 0.85;
     end = t + 0.42;
-    blip(e, e.sfx, false, 'sine', sub * 1.5, sub, 0.06, t, 0.002, lv * 0.85, end, 0.03);
+    blip(e, e.sfx, false, 'sine', sub * 1.5, sub, 0.06, t, 0.002, subLv, end, 0.03);
+    // Body knock: the weight of the BOOM on a small speaker.
+    blip(e, e.sfx, false, 'sine', 220, 180, 0.08, t, 0.0015, subLv * 0.5, t + 0.09);
+    // Skin slap: a short mid-band smack (BOOM's attack on a phone, under the 3.4 kHz tick).
+    noiseHit(e, e.sfx, false, 'bandpass', 1800, 1800, 1.4, t, 0.0008, lv * 0.25, t + 0.025);
     const lower = chainNoteHz(c - 1);
     blip(e, e.sfx, true, 'sine', lower * 1.5, lower, 0.04, t, 0.002, lv * 0.45, t + 0.3);
     noiseHit(e, e.sfx, false, 'lowpass', 420, 260, 0.8, t, 0.001, lv * 0.7, t + 0.09);

@@ -19,6 +19,7 @@ import {
   BUSH,
   CHAIN_HUES,
   DRUM,
+  FEVER,
   GOLDEN,
   GROUND_Y,
   HERO,
@@ -131,6 +132,10 @@ export interface SimCtx {
   cuttable: boolean;
   /** An ACTION press was consumed this sim step (teaching freeze release). */
   pressed: boolean;
+  /** A ground / coyote / buffered jump launched this sim step (first-run assisted jump). */
+  jumped: boolean;
+  /** The current flight is a BOING launch (longer slam lockout). */
+  boingLaunch: boolean;
   /** Footfall counter (dust every other one). */
   footFalls: number;
   /** A slam hit the GROUND this step (world bursts melons in reach). */
@@ -149,6 +154,14 @@ export interface SimCtx {
   freezeLevel: number;
   freezeReal: number;
   freezeDone: boolean;
+  /** Lesson slow-mo remaining (real s; SLAM / BOING prompts, first run). */
+  lessonSlowT: number;
+  /** First-run lessons already slowed for / HOLD prompt done (runs 1-3). */
+  slamTaught: boolean;
+  boingTaught: boolean;
+  holdShown: boolean;
+  /** Serial of the mound the HOLD prompt is showing for (0 = none yet). */
+  holdSerial: number;
 
   /* run bookkeeping */
   hornbillStomps: number;
@@ -206,6 +219,8 @@ export function createSimCtx(tm: HeroTimings): SimCtx {
     genEnabled: true,
     cuttable: false,
     pressed: false,
+    jumped: false,
+    boingLaunch: false,
     footFalls: 0,
     slamImpact: false,
     slamImpactX: 0,
@@ -217,6 +232,11 @@ export function createSimCtx(tm: HeroTimings): SimCtx {
     freezeLevel: 0,
     freezeReal: 0,
     freezeDone: false,
+    lessonSlowT: 0,
+    slamTaught: false,
+    boingTaught: false,
+    holdShown: false,
+    holdSerial: 0,
     hornbillStomps: 0,
     goalAtStart: 0,
     phaseAbs: 0,
@@ -264,6 +284,8 @@ export function createSimCtx(tm: HeroTimings): SimCtx {
 export function resetSimCtx(sim: SimCtx): void {
   sim.cuttable = false;
   sim.pressed = false;
+  sim.jumped = false;
+  sim.boingLaunch = false;
   sim.footFalls = 0;
   sim.slamImpact = false;
   sim.slamImpactX = 0;
@@ -275,6 +297,11 @@ export function resetSimCtx(sim: SimCtx): void {
   sim.freezeLevel = 0;
   sim.freezeReal = 0;
   sim.freezeDone = false;
+  sim.lessonSlowT = 0;
+  sim.slamTaught = false;
+  sim.boingTaught = false;
+  sim.holdShown = false;
+  sim.holdSerial = 0;
   sim.hornbillStomps = 0;
   sim.goalAtStart = 0;
   sim.phaseAbs = 0;
@@ -436,6 +463,7 @@ export function spawnEntity(state: GameState, sv: Services, kind: EntityKind, x:
   e.nearMin = 1e9;
   e.nearDone = false;
   e.template = state.debug.template;
+  e.lane = false;
   e.hazard = kind === 'bush' || kind === 'mound' || kind === 'hornbill' || kind === 'log';
   e.stompable = kind === 'drum' || kind === 'kiteDrum' || kind === 'hornbill' || kind === 'log';
   switch (kind) {
@@ -532,11 +560,16 @@ export function award(state: GameState, base: number, useMult: boolean): number 
   return p;
 }
 
-/** Fill the groove meter (frozen during TOTOTO TIME). */
+/**
+ * Fill the groove meter (frozen during TOTOTO TIME). Before FEVER.notBefore s of run time the
+ * meter stops at 99.9, so no natural fill starts a fever that early (setGroove still can).
+ */
 export function addGroove(state: GameState, amount: number): void {
   if (state.fever.active) return;
-  const g = state.run.groove + amount;
-  state.run.groove = g > GROOVE.max ? GROOVE.max : g;
+  let g = state.run.groove + amount;
+  if (g > GROOVE.max) g = GROOVE.max;
+  if (state.run.time < FEVER.notBefore && g > 99.9) g = 99.9;
+  state.run.groove = g;
 }
 
 /** Bank the chain on touching ground (chain >= 2 scores), then reset it. */
@@ -614,13 +647,16 @@ export function clearHazardsAhead(
     if (e.x + e.w < h.x - HERO.hurtW) continue;
     const gap = e.x - front;
     const closing = v - e.vx;
-    if (gap <= minU || gap <= seconds * closing) {
-      e.flag = 'smashed';
-      e.stateT = 0;
-      e.vx = 0;
-      sv.fx.burst('poof', e.x + e.w / 2, e.y + e.h / 2, 6);
-    }
+    if (gap <= minU || gap <= seconds * closing) poofHazard(sv, e);
   }
+}
+
+/** Remove a hazard with a poof (rule-8 clearing, fever-exit lane cleanup). */
+export function poofHazard(sv: Services, e: Entity): void {
+  e.flag = 'smashed';
+  e.stateT = 0;
+  e.vx = 0;
+  sv.fx.burst('poof', e.x + e.w / 2, e.y + e.h / 2, 6);
 }
 
 /** End the run: death pose, hit-stop, shake, burst, sfx, haptic. game.ts reacts to sim.died. */

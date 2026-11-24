@@ -26,7 +26,7 @@
  *  - play(id, param): fire-and-forget voices at ctx.currentTime (never quantised). Per-id
  *    polyphony + minimum spacing (mango / melon / smash bursts are spread into a quick arpeggio
  *    instead of stacking) and a global voice cap, so nothing clips or piles up. Big hits briefly
- *    duck the music.
+ *    duck the music; every drum / BOOM hit ducks it 3 dB (never below a bigger duck in progress).
  *  - update(state, realDt) once per frame: copies the inputs the arrangement needs, pumps the
  *    scheduler (also pumped by a 25 ms setInterval), drives musicFilter / music level from the
  *    mode (title soft, fever open, last 1.5 s of fever closing to 1.2 kHz, slow-mo dip,
@@ -56,7 +56,7 @@ export { chainNoteHz, semiHz } from './audio-synth';
 const MASTER_LEVEL = 0.9;
 /** Title music is also a little darker. */
 const TITLE_CUT = 4200;
-/** Lowest music cutoff during slow-mo (teaching freeze ~0.15x); near-miss 0.6x dips partway. */
+/** Lowest music cutoff during slow-mo (reached at <= 0.15x, e.g. the teaching freeze); near-miss 0.6x dips partway. */
 const SLOWMO_CUT = 520;
 /** Music level while paused (only audible during the 3-2-1, the context is suspended otherwise). */
 const PAUSED_LEVEL = 0.55;
@@ -66,6 +66,14 @@ const PAUSED_LEVEL = 0.55;
  * this the "quiet" loop measured only ~3 dB (K-weighted) under gameplay.
  */
 const GAMEOVER_TRIM = 0.45;
+/**
+ * Light duck under every drum / BOOM hit so the chain notes cut through the music: -3 dB
+ * (x0.71), 50 ms hold, 0.15 s release time constant. Never deeper than that on its own, and
+ * never on top of a bigger duck (see softDuck), so the music never sinks below the big-hit ducks.
+ */
+const HIT_DUCK = 0.29;
+const HIT_DUCK_HOLD = 0.05;
+const HIT_DUCK_RELEASE = 0.15;
 /** Fade before suspending / after resuming (s). */
 const SUSPEND_FADE = 0.03;
 /** Sounds may be queued for this long (ms) after asking a suspended context to resume. */
@@ -161,6 +169,10 @@ export function createAudio(): AudioApi {
   let lastCut = -1;
   let lastLevel = -1;
   let lastEcho = 0;
+
+  // Music duck: depth (amount) of the latest duck and when its hold ends (ctx seconds).
+  let duckDepth = 0;
+  let duckHoldEnd = 0;
 
   // Beat clock.
   let beatAcc = 0;
@@ -295,6 +307,8 @@ export function createAudio(): AudioApi {
     lastCut = -1;
     lastLevel = -1;
     lastEcho = dl.delayTime.value;
+    duckDepth = 0;
+    duckHoldEnd = 0;
   }
 
   /** iOS unlock idiom: start a 1-sample silent buffer inside the gesture. */
@@ -541,6 +555,29 @@ export function createAudio(): AudioApi {
     holdParam(p, t);
     p.setTargetAtTime(1 - amount, t, 0.012);
     p.setTargetAtTime(1, t + hold, release);
+    duckDepth = amount;
+    duckHoldEnd = t + hold;
+  }
+
+  /**
+   * Light duck (drum / BOOM hits). It only ever pulls the music down to 1 - amount, and leaves
+   * the gain alone when a deeper duck is still holding or the music is still releasing from one
+   * below that level, so it never stacks under (or cuts short) a big-hit duck. Back-to-back hits
+   * re-arm the hold.
+   */
+  function softDuck(amount: number, hold: number, release: number): void {
+    if (!ctx || !musicDuck) return;
+    const t = ctx.currentTime;
+    const holding = t < duckHoldEnd;
+    if (holding && duckDepth > amount) return;
+    const p = musicDuck.gain;
+    const target = 1 - amount;
+    if (!holding && p.value < target) return;
+    holdParam(p, t);
+    p.setTargetAtTime(target, t, 0.012);
+    p.setTargetAtTime(1, t + hold, release);
+    duckDepth = amount;
+    duckHoldEnd = t + hold;
   }
 
   function duckFor(id: SfxId): void {
@@ -548,8 +585,9 @@ export function createAudio(): AudioApi {
       case 'slamImpact':
         duck(0.45, 0.1, 0.16);
         break;
+      case 'drum':
       case 'drumBoom':
-        duck(0.35, 0.08, 0.18);
+        softDuck(HIT_DUCK, HIT_DUCK_HOLD, HIT_DUCK_RELEASE);
         break;
       case 'shieldBreak':
         duck(0.4, 0.1, 0.22);

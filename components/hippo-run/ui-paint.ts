@@ -153,11 +153,11 @@ export interface Seg {
   w: number;
 }
 
-const KEYWORDS: ReadonlyArray<string> = ['TAP', 'SPACE', 'SLAM', 'BOING!', 'BOING'];
-const KEYWORD_COLORS: ReadonlyArray<string> = [COL.gold, COL.gold, COL.red, COL.green, COL.green];
+const KEYWORDS: ReadonlyArray<string> = ['TAP', 'SPACE', 'HOLD', 'SLAM', 'BOING!', 'BOING', 'DRUM'];
+const KEYWORD_COLORS: ReadonlyArray<string> = [COL.gold, COL.gold, COL.gold, COL.red, COL.green, COL.green, COL.warm];
 
 /**
- * Split a line into coloured runs: TAP/SPACE gold, SLAM red, BOING green, the rest `base`.
+ * Split a line into coloured runs: TAP/SPACE/HOLD gold, SLAM red, BOING green, DRUM warm, the rest `base`.
  * Init-time only (allocates).
  */
 export function richLine(text: string, base: string): Seg[] {

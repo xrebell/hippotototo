@@ -8,12 +8,13 @@
  *   5b. diving (slam after the hang)                          -> BOING queued, fired on ground impact
  *       (discarded if the slam lands on a drum/stompable: the BOOM bounce happens instead)
  *   -   slam hang (0.05 s)                                     -> ignored
- *   2.  airborne < 0.12 s after takeoff/bounce                 -> ignored (kills double-tap slams)
+ *   2.  airborne < 0.18 s after takeoff/bounce (0.35 s after a BOING launch) -> ignored (kills
+ *       double-tap slams and the slam -> boing mash loop)
  *   3.  falling, time-to-ground <= 0.11 s with ground below    -> BUFFERED JUMP (fires on landing)
  *       "ground below" = no pit at the feet or at the predicted landing x, and no stompable top
  *       between the feet and the ground (falling onto a drum makes it a slam -> BOOM)
  *   4.  otherwise, once per airtime                            -> SLAM (0.05 s hang, then +1500)
- * Release: before PHYS.jumpMinHold of rise -> cut queued (tap hop ~71 u); after -> vy = max(vy, -360).
+ * Release: before PHYS.jumpMinHold of rise -> cut queued (tap hop ~83 u); after -> vy = max(vy, -420).
  * Only ground/coyote/buffered jumps are cuttable; bounces/boings/rescues never are.
  *
  * Physics: semi-implicit Euler at DT = 1/120, gravity 2600 rising / 3500 falling, terminal 1500.
@@ -302,11 +303,13 @@ export function launchHero(state: GameState, sim: SimCtx, vy: number, cuttable: 
   h.boingQueued = false;
   h.cutPending = false;
   sim.cuttable = cuttable;
+  sim.boingLaunch = false;
 }
 
 function doJump(state: GameState, sv: Services, sim: SimCtx): void {
   const h = state.hero;
   launchHero(state, sim, PHYS.jumpVy, true);
+  sim.jumped = true;
   // A press already released (buffered tap) still gives the tap hop.
   h.cutPending = !h.held;
   h.squashX = JUICE.takeoffX;
@@ -323,6 +326,7 @@ function doJump(state: GameState, sv: Services, sim: SimCtx): void {
 function doBoing(state: GameState, sv: Services, sim: SimCtx): void {
   const h = state.hero;
   launchHero(state, sim, PHYS.boingVy, false);
+  sim.boingLaunch = true;
   if (h.y > GROUND_Y) h.y = GROUND_Y;
   h.squashX = JUICE.boingX;
   h.squashY = JUICE.boingY;
@@ -382,7 +386,7 @@ export function heroPress(state: GameState, sv: Services, sim: SimCtx): void {
     return;
   }
   if (h.action === 'slamHang') return;
-  if (h.airT < PHYS.slamLockout) return;
+  if (h.airT < (sim.boingLaunch ? PHYS.slamLockoutAfterBoing : PHYS.slamLockout)) return;
   if (h.vy > 0 && groundSoon(state)) {
     h.bufferT = PHYS.jumpBuffer;
     return;
@@ -407,10 +411,11 @@ export function heroRelease(state: GameState, sim: SimCtx): void {
   sim.cuttable = false;
 }
 
-/** Explicit SLAM key (ArrowDown / S): air only, no lockout, once per airtime. */
+/** Explicit SLAM key (ArrowDown / S): air only, once per airtime; lockout only after a BOING. */
 export function heroSlamKey(state: GameState, sv: Services, sim: SimCtx): void {
   const h = state.hero;
   if (h.grounded || h.action !== 'air' || h.slamUsed) return;
+  if (sim.boingLaunch && h.airT < PHYS.slamLockoutAfterBoing) return;
   startSlam(state, sv, sim);
 }
 
@@ -475,6 +480,7 @@ function landOnGround(state: GameState, sv: Services, sim: SimCtx): void {
   }
   h.boingQueued = false;
   h.postSlamT = NEVER;
+  creditPitsCleared(state);
   let k = vy / JUICE.landDiv;
   if (k > JUICE.landMax) k = JUICE.landMax;
   if (k < 0) k = 0;
@@ -487,6 +493,20 @@ function landOnGround(state: GameState, sv: Services, sim: SimCtx): void {
   if (h.bufferT > 0) {
     h.bufferT = 0;
     doJump(state, sv, sim);
+  }
+}
+
+/** Groove for every pit the hero just landed beyond (once per pit; not rescued ones, not in fever). */
+function creditPitsCleared(state: GameState): void {
+  if (state.fever.active) return;
+  const x = state.hero.x;
+  const ents = state.entities;
+  for (let i = 0; i < ents.length; i++) {
+    const e = ents[i];
+    if (!e.active || e.kind !== 'pit' || e.nearDone || e.flag === 'rescued') continue;
+    if (e.x + e.w - PIT.lipInset > x) continue;
+    e.nearDone = true;
+    addGroove(state, GROOVE.hazardClear);
   }
 }
 
@@ -534,6 +554,8 @@ function mudContact(state: GameState, sv: Services, sim: SimCtx, pitIdx: number)
       pit.stateT = 0;
     }
     h.y = mudY;
+    // The geyser touches mud: the chain ends like a SPLORCH (kept in fever: pits are drum skins).
+    if (!state.fever.active) bankChain(state, sv, h.x, GROUND_Y);
     launchHero(state, sim, PHYS.shieldGeyserVy, false);
     h.squashX = 0.72;
     h.squashY = 1.32;

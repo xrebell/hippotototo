@@ -202,6 +202,7 @@ export function createEntity(): Entity {
     nearMin: 1e9,
     nearDone: false,
     template: '',
+    lane: false,
   };
 }
 
@@ -231,6 +232,7 @@ export function clearEntity(e: Entity): void {
   e.nearMin = 1e9;
   e.nearDone = false;
   e.template = '';
+  e.lane = false;
 }
 
 function createHero(): HeroState {
@@ -341,7 +343,7 @@ export function createGameState(seed: number, save: SaveData | null, standalone:
       phasesSeen: 1,
       goalDone: false,
     },
-    fever: { active: false, t: 0, count: 0 },
+    fever: { active: false, t: 0, count: 0, introT: 99 },
     phase: { index: 0, next: 1, blend: 0, loop: 0 },
     entities,
     mangoes,
@@ -413,6 +415,7 @@ export function resetRun(state: GameState, seed: number): void {
   state.fever.active = false;
   state.fever.t = 0;
   state.fever.count = 0;
+  state.fever.introT = 99;
   phaseAt(0, state.phase);
 
   for (let i = 0; i < state.entities.length; i++) clearEntity(state.entities[i]);

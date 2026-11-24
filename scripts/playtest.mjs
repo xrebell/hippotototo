@@ -13,6 +13,7 @@
  *   node scripts/playtest.mjs --shots /tmp/shots            # also save screenshots (1366x768 + 390x844)
  *   node scripts/playtest.mjs --only rules,touch            # run a subset of groups (see GROUPS)
  *   node scripts/playtest.mjs --fps-seconds 30              # real-time fps window (default 15)
+ *   node scripts/playtest.mjs --file /tmp/x/play.html       # standalone target from another bundle
  *
  * Playwright: uses require('playwright') (local or the global install). No new dependencies.
  * Exit code 0 only when every check passes. A JSON report is written next to the screenshots
@@ -32,7 +33,6 @@ import { createServer } from 'node:net';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const PLAY_HTML = join(ROOT, 'public', 'play.html');
 const DT = 1 / 120;
 
 /* ------------------------------------------------------------------ */
@@ -54,7 +54,10 @@ const OPT = {
   fpsSeconds: Number(arg('--fps-seconds', 15)),
   port: Number(arg('--port', 3123)),
   verbose: argv.includes('--verbose'),
+  file: arg('--file', null),
 };
+// Standalone bundle under test (default public/play.html; --file points at a scratch build).
+const PLAY_HTML = OPT.file && OPT.file !== true ? resolve(String(OPT.file)) : join(ROOT, 'public', 'play.html');
 const GROUPS = ['static', 'console', 'rules', 'physics', 'mud', 'fever', 'flag', 'keyboard', 'touch', 'storage', 'sabotage', 'viewport', 'pause', 'remount', 'parity', 'human', 'fps', 'shots'];
 const ONLY = OPT.only ? String(OPT.only).split(',') : null;
 const want = (g) => !ONLY || ONLY.includes(g);
@@ -270,6 +273,46 @@ async function testConsole(url) {
   await ctx.close();
 }
 
+/**
+ * ?seed= with a malformed %-escape must never break the boot (decodeURIComponent throws on it):
+ * ?seed=%25 (a valid escape, the control), ?seed=% and ?seed=abc%zz -> __hippoRun defined, a run
+ * starts with a finite seed, no page error / console error.
+ */
+async function testSeedParam(url) {
+  for (const q of ['%25', '%', 'abc%zz']) {
+    const ctx = await browser.newContext({ viewport: { width: 1366, height: 768 } });
+    const page = await ctx.newPage();
+    const errs = [];
+    page.on('pageerror', (e) => errs.push(`pageerror: ${e.message}`));
+    page.on('console', (m) => {
+      if (m.type() === 'error') errs.push(`error: ${m.text()}`);
+    });
+    const r = { url: '?seed=' + q };
+    try {
+      const resp = await page.goto(url + (url.includes('?') ? '&' : '?') + 'seed=' + q, { waitUntil: 'load' });
+      r.status = resp ? resp.status() : null;
+      await page.waitForFunction(() => !!window.__hippoRun, null, { timeout: 8000 });
+      r.api = true;
+      const s = await page.evaluate(() => {
+        const H = window.__hippoRun;
+        const s0 = H.getState();
+        H.start();
+        H.advance(1);
+        const s1 = H.getState();
+        return { title: s0.state, state: s1.state, seed: s1.seed, time: +s1.time.toFixed(2), search: location.search };
+      });
+      Object.assign(r, s);
+      await page.waitForTimeout(300);
+    } catch (e) {
+      r.api = false;
+      r.threw = String((e && e.message) || e).split('\n')[0];
+    }
+    r.errors = errs;
+    check(`?seed=${q}${q === '%25' ? ' (control)' : ''}: boots with __hippoRun, a run starts, no page error`, r.api && r.title === 'title' && r.state === 'playing' && Number.isFinite(r.seed) && errs.length === 0, r);
+    await ctx.close();
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Game rules via advance(): opening, no-input death, determinism,     */
 /* autopilot fairness, invincible soak                                 */
@@ -413,6 +456,193 @@ async function testRules(url) {
   check('no console errors/warnings during sim checks (incl. ?debug=1 fairness asserts over ~30 min of generated course)', msgs.length === 0, msgs.length ? msgs.slice(0, 5).join(' || ') : 'none');
   await ctx.close();
   return ap;
+}
+
+/**
+ * First-ever run (fresh storage): the TAP lesson cannot be failed by a tap. A real touchscreen tap
+ * 100 / 600 / 1300 / 2400 ms (real time) after the teaching freeze engages clears the first bush:
+ * still playing at run time 7 s. Seeds 1 and 7; the run is fast-forwarded to 3.5 s first (no
+ * hazard before 5 s), everything from there on is real time.
+ */
+async function testTapLesson(url) {
+  const rows = [];
+  const errs = [];
+  for (const seed of [1, 7]) {
+    for (const delay of [100, 600, 1300, 2400]) {
+      const { ctx, page, msgs } = await openPage(url + (url.includes('?') ? '&' : '?') + 'seed=' + seed, { touch: true });
+      const row = { seed, delay };
+      // a tap point on the canvas that is not on a canvas button
+      const pt = await page.evaluate(() => {
+        const H = window.__hippoRun;
+        const c = document.querySelector('canvas').getBoundingClientRect();
+        const btns = H.getButtons();
+        const onBtn = (x, y) => btns.some((b) => x >= b.x - 10 && x <= b.x + b.w + 10 && y >= b.y - 10 && y <= b.y + b.h + 10);
+        for (const [fx, fy] of [
+          [0.5, 0.62],
+          [0.5, 0.8],
+          [0.35, 0.5],
+          [0.65, 0.5],
+        ]) {
+          const x = c.width * fx;
+          const y = c.height * fy;
+          if (!onBtn(x, y)) return { x: c.left + x, y: c.top + y };
+        }
+        return { x: c.left + c.width * 0.5, y: c.top + c.height * 0.62 };
+      });
+      await page.touchscreen.tap(pt.x, pt.y);
+      row.startMs = Math.round(await waitMode(page, 'playing', 1000));
+      const pre = await page.evaluate(() => {
+        const H = window.__hippoRun;
+        for (let i = 0; i < 600 && H.getState().state === 'playing' && H.getState().time < 3.5 && !H.getState().freeze; i++) H.advance(1 / 120);
+        const s = H.getState();
+        return { tutorial: s.tutorial, freeze: s.freeze, time: +s.time.toFixed(2) };
+      });
+      row.tutorial = pre.tutorial;
+      const fr = await page.evaluate(
+        () =>
+          new Promise((res) => {
+            const H = window.__hippoRun;
+            const t0 = performance.now();
+            const tick = () => {
+              const s = H.getState();
+              if (s.freeze) return res({ ok: true, t: +s.time.toFixed(3) });
+              if (s.state !== 'playing' || performance.now() - t0 > 6000) return res({ ok: false, t: +s.time.toFixed(3), state: s.state });
+              requestAnimationFrame(tick);
+            };
+            tick();
+          }),
+      );
+      row.freezeAt = fr.t;
+      if (fr.ok) {
+        await page.waitForTimeout(delay);
+        const sTap = await S(page);
+        row.tapAt = { time: +sTap.time.toFixed(3), freeze: sTap.freeze };
+        await page.touchscreen.tap(pt.x, pt.y);
+        const end = await page.evaluate(
+          () =>
+            new Promise((res) => {
+              const H = window.__hippoRun;
+              const t0 = performance.now();
+              let apex = 0;
+              const tick = () => {
+                const s = H.getState();
+                if (s.heroY > apex) apex = s.heroY;
+                if (s.state !== 'playing' || s.time >= 7 || performance.now() - t0 > 9000) return res({ state: s.state, time: +s.time.toFixed(2), cause: s.deathCause, apex: Math.round(apex) });
+                requestAnimationFrame(tick);
+              };
+              tick();
+            }),
+        );
+        Object.assign(row, end);
+      } else row.state = 'no freeze (' + fr.state + ')';
+      rows.push(row);
+      for (const m of msgs) errs.push(`seed ${seed}/${delay}ms ${m}`);
+      await ctx.close();
+    }
+  }
+  const ok = rows.every((r) => r.tutorial && r.state === 'playing' && r.time >= 7);
+  check(
+    'first run: a real tap 100/600/1300/2400 ms into the teaching freeze clears the bush (seeds 1, 7: playing at 7 s)',
+    ok,
+    rows.map((r) => `s${r.seed}+${r.delay}ms: freeze@${r.freezeAt} tap@${r.tapAt ? r.tapAt.time : '-'} -> ${r.state}@${r.time}${r.cause ? ' ' + r.cause : ''} apex ${r.apex}`).join(' | '),
+  );
+  check('no console errors/warnings (tap lesson)', errs.length === 0, errs.slice(0, 4).join(' || ') || 'none');
+}
+
+/**
+ * Returning player (tutorialSeen save):
+ *  - a 15 Hz masher (press every 8th 120 Hz step, release 4 steps later) is not a strategy:
+ *    at most 2 of seeds 1–10 are still alive at sim 60 s, and TOTOTO TIME never starts before 15 s;
+ *  - power-up bubbles need a hop: a zero-input invincible run (120 s, seeds 1–3) never gains a Mud Coat.
+ */
+async function testMasher(url) {
+  const init = () => {
+    try {
+      localStorage.setItem('hippotototo.v1', JSON.stringify({ v: 1, best: 0, bestDist: 0, bestChain: 0, runs: 5, totalMangoes: 0, muted: true, reducedMotion: false, tutorialSeen: true, goalIndex: 0 }));
+    } catch (_e) {
+      /* ignore */
+    }
+  };
+  const { ctx, page, msgs } = await openPage(url, { init });
+  await lib(page);
+  const mash = await page.evaluate(() => {
+    const P = window.__pt;
+    const H = P.H;
+    const out = [];
+    for (let seed = 1; seed <= 10; seed++) {
+      P.fresh(seed);
+      let s = P.st();
+      let fever = -1;
+      for (let i = 1; i < 120 * 90 && s.state === 'playing' && s.time < 60; i++) {
+        if (i % 8 === 0) H.press();
+        else if (i % 8 === 4) H.release();
+        H.advance(P.DT);
+        s = P.st();
+        if (s.fever && fever < 0) fever = +s.time.toFixed(2);
+      }
+      H.release();
+      const row = { seed, alive: s.state === 'playing' && s.time >= 60, time: +s.time.toFixed(1), cause: s.deathCause, fever, score: s.score };
+      // The same masher made invincible, so the groove economy is measured even when mashing dies early.
+      P.fresh(seed);
+      H.setInvincible(true);
+      s = P.st();
+      row.feverInv = -1;
+      for (let i = 1; i < 120 * 30 && s.state === 'playing' && s.time < 20; i++) {
+        if (i % 8 === 0) H.press();
+        else if (i % 8 === 4) H.release();
+        H.advance(P.DT);
+        s = P.st();
+        if (s.fever && row.feverInv < 0) row.feverInv = +s.time.toFixed(2);
+      }
+      H.release();
+      H.setInvincible(false);
+      out.push(row);
+    }
+    return out;
+  });
+  const alive = mash.filter((m) => m.alive).length;
+  const earlyFever = mash.filter((m) => (m.fever >= 0 && m.fever < 15) || (m.feverInv >= 0 && m.feverInv < 15));
+  check(
+    '15 Hz masher (tutorialSeen): <= 2 of seeds 1–10 alive at sim 60 s, no TOTOTO TIME before 15 s (also when invincible)',
+    alive <= 2 && earlyFever.length === 0,
+    `alive ${alive}/10; ` + mash.map((m) => `${m.seed}:${m.alive ? 'alive' : m.cause + '@' + m.time}${m.fever >= 0 ? ' fever@' + m.fever : ''}${m.feverInv >= 0 ? ' invFever@' + m.feverInv : ''}`).join(' '),
+  );
+  const bub = await page.evaluate(() => {
+    const P = window.__pt;
+    const H = P.H;
+    const out = [];
+    for (let seed = 1; seed <= 3; seed++) {
+      P.fresh(seed);
+      H.setInvincible(true);
+      let s = P.st();
+      let shieldAt = -1;
+      let bubbles = 0;
+      const seen = {};
+      for (let i = 0; i < 120 * 130 && s.state === 'playing' && s.time < 120; i++) {
+        H.advance(P.DT);
+        s = P.st();
+        if (s.shield && shieldAt < 0) shieldAt = +s.time.toFixed(2);
+        if (i % 60 === 0) {
+          for (const e of P.ents()) {
+            if ((e.kind === 'pickupShield' || e.kind === 'pickupMagnet') && !seen[e.serial]) {
+              seen[e.serial] = 1;
+              bubbles++;
+            }
+          }
+        }
+      }
+      H.setInvincible(false);
+      out.push({ seed, time: +s.time.toFixed(1), state: s.state, shieldAt, bubbles });
+    }
+    return out;
+  });
+  check(
+    'zero-input invincible run (120 s, seeds 1–3) never gains a Mud Coat (bubbles need a hop)',
+    bub.every((b) => b.shieldAt < 0 && b.time >= 120),
+    bub.map((b) => `${b.seed}: ${b.state}@${b.time}s, bubbles seen ${b.bubbles}, shield ${b.shieldAt < 0 ? 'never' : '@' + b.shieldAt + 's'}`).join(' | '),
+  );
+  check('no console errors/warnings (masher / bubbles)', msgs.length === 0, msgs.slice(0, 4).join(' || ') || 'none');
+  await ctx.close();
 }
 
 /* ------------------------------------------------------------------ */
@@ -771,6 +1001,39 @@ async function testFever(url) {
   check('TOTOTO TIME lasts 6 s', Math.abs(r.duration - 6) < 0.02, `${r.duration} s`);
   check('no hazard ends the run during TOTOTO TIME (no input)', r.stateDuring === 'playing', `state ${r.stateDuring}, hazards/pits met ${r.hazardsMet}`);
   check('no hazard or pit within 500 u ahead when it ends; meter reset', r.aheadAfter.length === 0 && r.grooveAfter === 0, `ahead: [${r.aheadAfter.join(', ')}], groove ${r.grooveAfter}`);
+  // Same seed-77 fever again, counting smashes: a hazard flagged 'smashed' while it overlaps Toto
+  // (the fever-exit clear poofs hazards AHEAD and happens on the step the fever ends: not counted).
+  const sm = await page.evaluate(() => {
+    const P = window.__pt;
+    const H = P.H;
+    P.fresh(77);
+    H.setAutopilot(true);
+    H.advance(70);
+    H.setAutopilot(false);
+    const seen = {};
+    for (const e of P.ents()) if (e.flag === 'smashed') seen[e.serial] = 1;
+    const score0 = P.st().score;
+    H.setGroove(100);
+    let smashes = 0;
+    let lane = 0;
+    const kinds = {};
+    for (let i = 0; i < 120 * 8; i++) {
+      H.advance(P.DT);
+      const s = P.st();
+      if (!s.fever || s.state !== 'playing') break;
+      for (const e of P.ents()) {
+        if (e.flag !== 'smashed' || seen[e.serial]) continue;
+        seen[e.serial] = 1;
+        if (e.x < s.heroX + 60 && e.x + e.w > s.heroX - 60) {
+          smashes++;
+          if (e.lane) lane++;
+          kinds[e.kind] = (kinds[e.kind] || 0) + 1;
+        }
+      }
+    }
+    return { smashes, lane, kinds, scoreDelta: P.st().score - score0 };
+  });
+  check('seed-77 TOTOTO TIME has things to smash (>= 5 smashes, no input)', sm.smashes >= 5, sm);
   await ctx.close();
 }
 
@@ -1230,6 +1493,16 @@ async function testPause(url) {
   await page.waitForTimeout(1200);
   const still2 = (await S(page)).state;
   check('hidden tab pauses within one frame; visible again does not resume', hidden === 'paused' && still2 === 'paused', { nextFrame: hidden, afterVisible: still2 });
+  // Esc during the 3-2-1 cancels the countdown (stays paused); the next Esc/P starts it again.
+  await page.keyboard.press('KeyP');
+  await page.waitForTimeout(400);
+  const counting = (await S(page)).state;
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(1500);
+  const afterEsc = (await S(page)).state;
+  await page.keyboard.press('KeyP');
+  const reResume = await waitMode(page, 'playing', 2500);
+  check('Esc during the 3-2-1 cancels it: still paused 1.5 s later (P then resumes)', counting === 'paused' && afterEsc === 'paused' && reResume > 0, { during321: counting, after1500ms: afterEsc, resumedAfterP: Math.round(reResume) + ' ms' });
   check('no console errors/warnings (pause)', msgs.length === 0, msgs.join(' || ') || 'none');
   await ctx.close();
 }
@@ -1301,6 +1574,74 @@ async function testRemount(base) {
   check('client-side unmount destroys the game (no API, no live AudioContext)', !away.api && away.acLive === 0, away);
   check('re-mount: one rAF loop (~60/s), one live AudioContext, same keydown listener count', r2 < 90 && r2 > 30 && p2.acLive <= 1 && p2.keydown === p1.keydown, { rafPerSec: [r1, r2], acLive: [p1.acLive, p2.acLive], acMade: p2.acMade, keydown: [p1.keydown, away.keydown, p2.keydown] });
   check('no console errors/warnings (remount)', msgs.length === 0, msgs.join(' || ') || 'none');
+  await ctx.close();
+}
+
+/** Header attributes the game toggles while /play is mounted. */
+const headerAttrs = () => {
+  const h = document.querySelector('header');
+  return h ? { inert: h.hasAttribute('inert'), ariaHidden: h.getAttribute('aria-hidden') } : null;
+};
+
+/**
+ * Next only: keyboard path out of /play. The site header under the fullscreen game is inert, so
+ * the first Tab stop is the visible "Back to site" link; Enter on it navigates to "/" (the game
+ * leaves keys aimed at page controls alone), and the header is interactive again there.
+ */
+async function testSiteNav(base) {
+  const { ctx, page, msgs } = await openPage(base + '/play');
+  const hdr = await page.evaluate(headerAttrs);
+  await page.keyboard.press('Tab');
+  const focused = await page.evaluate(() => {
+    const a = document.activeElement;
+    return { tag: a ? a.tagName : null, text: a ? (a.textContent || '').trim() : null, href: a && a.getAttribute ? a.getAttribute('href') : null, inHeader: !!(a && a.closest && a.closest('header')) };
+  });
+  check('/play: site header is inert + aria-hidden; first Tab stop is "Back to site"', !!hdr && hdr.inert && hdr.ariaHidden === 'true' && /Back to site/.test(focused.text || '') && !focused.inHeader, { header: hdr, firstTab: focused });
+  const st = (await S(page)).state;
+  await page.keyboard.press('Enter');
+  let navigated = true;
+  try {
+    await page.waitForURL((u) => u.pathname === '/', { timeout: 8000 });
+  } catch (_e) {
+    navigated = false;
+  }
+  await page.waitForTimeout(500);
+  const after = await page.evaluate(() => {
+    const h = document.querySelector('header');
+    const a = h && h.querySelector('a[href="/play"]');
+    if (a) a.focus();
+    return { path: location.pathname, api: !!window.__hippoRun, focusable: !!a && document.activeElement === a };
+  });
+  const hdr2 = await page.evaluate(headerAttrs);
+  check('Enter on the focused "Back to site" link navigates to "/"', navigated && after.path === '/' && !after.api, { gameStateBeforeEnter: st, path: after.path, apiLeft: after.api });
+  check('back on "/": the site header is interactive again (no inert / aria-hidden, links take focus)', !!hdr2 && !hdr2.inert && hdr2.ariaHidden === null && after.focusable, { header: hdr2, headerLinkFocusable: after.focusable });
+  check('no console errors/warnings (site navigation)', msgs.length === 0, msgs.join(' || ') || 'none');
+  await ctx.close();
+}
+
+/** Next only: the header logo link is prefetched again ("/" RSC payload) on a regular site page. */
+async function testLogoPrefetch(base) {
+  const ctx = await browser.newContext({ viewport: { width: 1366, height: 768 } });
+  const page = await ctx.newPage();
+  const rsc = [];
+  page.on('request', (r) => {
+    let u;
+    try {
+      u = new URL(r.url());
+    } catch (_e) {
+      return;
+    }
+    const h = r.headers();
+    if (u.pathname === '/' && (h.rsc === '1' || u.searchParams.has('_rsc'))) rsc.push({ prefetch: h['next-router-prefetch'] || null, url: u.pathname + u.search });
+  });
+  await page.goto(base + '/signin', { waitUntil: 'load' });
+  await page.waitForTimeout(500);
+  await page.hover('header a[href="/"]');
+  await page.waitForTimeout(1200);
+  // `next dev` never prefetches (unhashed dev chunk names give it away): report only.
+  const dev = await page.evaluate(() => Array.from(document.scripts).some((s) => /\/_next\/static\/chunks\/(webpack|main-app)\.js(\?|$)|turbopack/.test(s.src)));
+  if (dev) info('/signin: hovering the header logo has "/" prefetched (RSC request)', `dev server (no prefetching in development); RSC requests seen: ${rsc.length}`);
+  else check('/signin: hovering the header logo has "/" prefetched (RSC request)', rsc.length > 0, rsc.length ? rsc.slice(0, 3) : 'no RSC request for /');
   await ctx.close();
 }
 
@@ -1713,19 +2054,32 @@ async function stopServer(child) {
 async function runTarget(name, url, isNext) {
   currentTarget = name;
   console.log(`\n=== ${name}: ${url} ===`);
-  if (want('console')) await guard('console journey', () => testConsole(url));
-  if (want('rules')) await guard('rules', () => testRules(url));
+  if (want('console')) {
+    await guard('console journey', () => testConsole(url));
+    await guard('seed param', () => testSeedParam(url));
+  }
+  if (want('rules')) {
+    await guard('rules', () => testRules(url));
+    await guard('tap lesson', () => testTapLesson(url));
+    await guard('masher + bubbles', () => testMasher(url));
+  }
   if (want('physics')) await guard('physics', () => testPhysics(url));
   if (want('mud')) await guard('mud', () => testMud(url));
   if (want('fever')) await guard('fever', () => testFever(url));
   if (want('flag')) await guard('best flag', () => testFlag(url));
-  if (want('keyboard')) await guard('keyboard', () => testKeyboard(url));
+  if (want('keyboard')) {
+    await guard('keyboard', () => testKeyboard(url));
+    if (isNext) await guard('site navigation', () => testSiteNav(url.replace(/\/play$/, '')));
+  }
   if (want('touch')) await guard('touch', () => testTouch(url));
   if (want('storage')) await guard('storage', () => testStorage(url));
   if (want('sabotage')) await guard('sabotage', () => testSabotage(url));
   if (want('viewport')) await guard('viewport', () => testViewport(url));
   if (want('pause')) await guard('pause', () => testPause(url));
-  if (isNext && want('remount')) await guard('remount', () => testRemount(url.replace(/\/play$/, '')));
+  if (isNext && want('remount')) {
+    await guard('remount', () => testRemount(url.replace(/\/play$/, '')));
+    await guard('logo prefetch', () => testLogoPrefetch(url.replace(/\/play$/, '')));
+  }
   if (want('human')) await guard('human play', () => testHuman(url));
   if (want('fps')) {
     await guard('fps', () => testFps(url, OPT.fpsSeconds));

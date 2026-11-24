@@ -105,7 +105,12 @@ export type HeroExpr =
 
 export type Medal = 'none' | 'bronze' | 'silver' | 'gold';
 
-export type TutorialPrompt = 'none' | 'tap' | 'slam' | 'boing';
+/**
+ * Tutorial prompt. 'tap' at the first bush; 'drum' (JUMP ON THE DRUM, at the lesson drum pair);
+ * 'slam' / 'boing' anchored ON Toto at the moment the tap does that; 'hold' over the first mound
+ * (runs 1-3).
+ */
+export type TutorialPrompt = 'none' | 'tap' | 'slam' | 'boing' | 'hold' | 'drum';
 
 export type PauseReason = 'none' | 'user' | 'blur' | 'hidden' | 'resize';
 
@@ -308,6 +313,8 @@ export interface Entity {
   nearDone: boolean;
   /** Template that spawned this entity ('' if none). Debug overlay label. */
   template: TemplateId | '';
+  /** Spawned by the TOTOTO TIME smash lane (poofed when the fever ends). */
+  lane: boolean;
 }
 
 /* ------------------------------------------------------------------ */
@@ -445,6 +452,8 @@ export interface FeverState {
   t: number;
   /** Times triggered this run. */
   count: number;
+  /** Real s since the latest fever start (entry banner timing); 99 when none this run. */
+  introT: number;
 }
 
 /** [G] Day phase derived from distance every step. 0 dawn, 1 noon, 2 dusk, 3 night. */
@@ -908,6 +917,8 @@ export interface DebugEntity {
   flag: EntityFlag;
   hazard: boolean;
   serial: number;
+  /** TOTOTO TIME lane entity. */
+  lane: boolean;
 }
 
 /** Visible canvas button in CSS px relative to the canvas (getButtons). */

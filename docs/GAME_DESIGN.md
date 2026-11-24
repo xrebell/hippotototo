@@ -429,13 +429,14 @@ export function createGame(canvas: HTMLCanvasElement, opts?: GameOptions): GameH
 
 ### 14.7 React mount
 - `app/play/page.tsx` (server component): `export const metadata = { title: 'Hippo Tototo — Play', description: ... }`; renders `<HippoRunClient />`.
-- `hippo-run-client.tsx`: `'use client'`; a `div` with `fixed inset-0 z-50 bg-[#0B0B1E]` and `height: 100dvh` (covers the site header from the root layout; do not edit `app/layout.tsx`); a `<canvas className="block h-full w-full touch-none select-none" />`; `useEffect` -> `createGame(canvas, { onStateChange })` -> cleanup `destroy()`.
+- `hippo-run-client.tsx`: `'use client'`; a `div` with `fixed inset-0 z-50 bg-[#0B0B1E]` and `height: 100dvh` (covers the site header from the root layout; do not edit `app/layout.tsx`); a `<canvas className="block h-full w-full touch-none select-none" />`; `useEffect` -> `createGame(canvas, { onStateChange })` -> cleanup `destroy()`. The same effect marks the covered site `<header>` `inert` + `aria-hidden="true"` (so its hidden links never take Tab focus: the first Tab stop on `/play` is "Back to site") and restores the previous attribute values in the cleanup (StrictMode-safe; the header is interactive again after navigating away).
 - Game-page chrome: while state is `title`, `paused` or `gameover`, show a small top-left DOM link "<- Back to site" (`next/link` to `/`) and, on `title` only, a bottom-centre footer line in `text-xs text-indigo-200/60`: "Hippo Tototo · a playable demo" plus a link "Standalone version" to `/play.html`. Hidden while playing so nothing overlaps the HUD.
 - Add one "Play the demo" link to `/play` in the landing page hero or header nav if it is a one-line change; do not restructure existing components.
 
 ### 14.8 Standalone build (`scripts/build-standalone.mjs`, no new deps)
 - Read every `.ts` (not `.tsx`) in `components/hippo-run/`; `ts.transpileModule` each with `{ module: CommonJS, target: ES2019, isolatedModules: true, removeComments: true }`.
 - Emit one IIFE with a ~25-line module registry: `const defs = { 'config': function(module, exports, require) {...}, ... }`, `require` normalises `./name`, caches exports. Entry: `require('index').createGame(document.getElementById('game'), { standalone: true })`.
+- Drop the whitespace between tokens (line breaks kept so ASI is unchanged; the re-parsed token stream must match, else only strip indentation) to stay well under 400 KB.
 - Escape `</script` in the bundled code. Write `public/play.html`: doctype, `<meta charset>`, `<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">`, `<title>`, inline CSS (`html,body{margin:0;height:100%;background:#0B0B1E;overflow:hidden}` canvas `width:100vw;height:100dvh;display:block;touch-action:none`), one canvas, the inline script. No external URLs of any kind.
 - `package.json` scripts: `"build:play": "node scripts/build-standalone.mjs"` and `"prebuild": "node scripts/build-standalone.mjs"`. Commit the generated `public/play.html`.
 
