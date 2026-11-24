@@ -1,6 +1,16 @@
-# HIPPO TOTOTO: Stomp the Beat — Final Build Spec
+# HIPPO TOTOTO: Stomp the Beat — Game Design Spec
 
-Hand-off spec for one engineer, one pass. Target 2,200–2,900 lines of TypeScript. Where this spec gives a number, use it as the starting value and keep it in `config.ts` so it can be tuned with the game running. Feel beats feature count: if time runs short, follow the cut order in section 16, never cut anything in the "never cut" list.
+**Status: shipped.** This document reflects the **shipped tuning**. Every number lives in `components/hippo-run/config.ts` (the source of truth if the two ever disagree); module wiring and test hooks are in `components/hippo-run/CONTRACTS.md`. It began as a one-pass hand-off spec; the values below were updated after playtesting. Nothing on the cut list (section 16) was cut.
+
+## How to run
+
+| What | Command / URL |
+|---|---|
+| Dev server (Next route) | `pnpm install && pnpm dev`, then open `http://localhost:3000/play` |
+| Standalone single file | open `public/play.html` directly (no server needed), or `/play.html` on the site. Rebuild it with `pnpm build:play` (= `node scripts/build-standalone.mjs [--out path]`) |
+| Production build | `pnpm build` (`prebuild` regenerates `public/play.html` first), then `pnpm start` |
+| Acceptance suite | `node scripts/playtest.mjs` after `pnpm build` (both builds, Playwright Chromium). `--no-next` = standalone only, `--only rules,touch` = some groups, `--shots DIR` = screenshots + JSON report |
+| Debug | URL params `?seed=N`, `?debug=1` (hitboxes, template, speed, fps), `?gallery=1` (one of every entity, invincible); `window.__hippoRun` (section 14.6) |
 
 ---
 
@@ -59,8 +69,9 @@ Input rules:
 ### What ACTION does (state by state)
 
 1. **Grounded, or within coyote time (0.09 s after leaving ground): JUMP.** `vy = -900`.
-   - Variable height: on release while `vy < -360`, set `vy = -360`. Tap (~60 ms) ~= 74 u apex / 0.40 s air; full hold = 156 u apex / 0.644 s air.
-2. **Airborne, not slamming, less than 0.12 s since takeoff/bounce:** ignored (kills accidental double-tap slams).
+   - Variable height: on release while `vy < -420`, set `vy = -420`; a release before 0.06 s of rise is applied at 0.06 s. Tap ~= 80 u apex; full hold = 156 u apex / 0.644 s air.
+   - Bush-aware tap: if that tap hop would come down on the next live thorn bush, the cut is deferred (in sim steps, up to 0.135 s of rise) to the shortest hold that clears it, so an early quick tap still clears a bush. Taps elsewhere and every mound keep plain physics (mounds need a hold).
+2. **Airborne, not slamming, less than 0.18 s since takeoff/bounce (0.35 s after a BOING launch):** ignored (kills accidental double-tap slams and the slam -> boing mash loop). The explicit SLAM key has only the after-BOING lockout.
 3. **Airborne, falling, predicted time-to-ground <= 0.11 s (ground exists below): BUFFERED JUMP.** Fires on the landing step (buffer valid 0.13 s). Prediction: closed-form with fall gravity against `GROUND_Y`; if a pit is below, there is no ground so rule 4 applies.
 4. **Airborne otherwise: SLAM.** 0.05 s hang (`vy = 0`, belly-down pose, cheek puff, whistle), then `vy = +1500` constant. One slam per airtime; refreshed by any bounce or landing. Not cancellable.
 5. **While slamming (after the hang), or within 0.12 s after a slam hits the ground: BOING.** Queued and fired on impact (or immediately if inside the post-impact window): `vy = -1120` (apex ~241 u, air ~0.80 s), "to-to-TO". Never cut by release. If the slam lands on a drum/stompable instead, the queued press is discarded (the BOOM bounce happens anyway).
@@ -81,11 +92,11 @@ Fixed sim step `DT = 1/120 s`.
 | Gravity falling | 3500 u/s^2 |
 | Terminal fall | 1500 u/s |
 | Jump vy | -900 |
-| Jump cut vy | -360 |
+| Jump cut vy | -420 (min rise before the cut 0.06 s; bush-aware up to 0.135 s) |
 | Coyote | 0.09 s |
 | Jump buffer | 0.13 s |
 | Smart-buffer threshold | 0.11 s to ground |
-| Slam lockout after takeoff | 0.12 s |
+| Slam lockout after takeoff | 0.18 s (0.35 s after a BOING launch) |
 | Slam hang / speed | 0.05 s / +1500 |
 | Boing vy / window | -1120 / during slam + 0.12 s after impact |
 | Drum bounce vy | -900 |
@@ -93,12 +104,12 @@ Fixed sim step `DT = 1/120 s`.
 | Mud rescue bounce vy | -900 |
 | Hero sprite | 76 x 60 u, origin at feet centre |
 | Hero hurtbox | 48 x 42 u, centred in x, bottom 4 u above feet |
-| Hazard hitboxes | drawn shape inset 15% in width, 8 u off the top |
+| Hazard hitboxes | drawn shape inset 15% in width, 8 u off the top; thorn bush 30% / 12 u (~31 x 22 u) |
 | Pickup radius | hurtbox expanded by 18 u |
 | Speed | `v(t) = 340 + 280 * (1 - exp(-t / 75))` u/s (t = run seconds). 340 start, ~433 @30 s, ~494 @60 s, ~563 @120 s, asymptote 620 |
 | Derived (compute in code, do not hard-code) | `T_JUMP` 0.644 s (ground->ground full jump), `T_ON` 0.603 s (ground takeoff -> falling through drum top), `T_BB` 0.644 s (drum top -> drum top), `T_BOOM` 0.788 s (slam bounce, drum -> drum), `T_OFF` 0.68 s (drum -> ground) |
 
-Speed never changes for power-ups (drum spacing depends on it). Global `timeScale` (hit-stop, near-miss slow-mo, death slow-mo, first-run teaching freeze) scales sim dt uniformly.
+Speed never changes for power-ups (drum spacing depends on it). Global `timeScale` (hit-stop, near-miss slow-mo, death slow-mo, first-run lesson slow-mo and teaching freeze) scales sim dt uniformly.
 
 Landing/bounce detection (shared rule): hero is falling (`vy > 0`), x-ranges overlap (target widened 10 u each side), and feet were at or above `targetTop + 14` on the previous step and at/below `targetTop` now. For moving stompables also accept "feet above the target's vertical centre and `vy > 0`" so a marginal contact is a stomp, not a hit.
 
@@ -152,23 +163,25 @@ All gameplay objects get a 3 u dark outline `#1B1B3A`; background layers get non
   - TOTOTO TIME: everything x2, each smashed hazard +50.
 
 ### 6.2 Groove meter and TOTOTO TIME
-- Meter 0–100: mango +1.2, drum bounce +7, BOOM bounce +10, stomp +8, near miss +5, melon smash +4, boing +4, golden +15. Decays 1.5/s only while grounded. Frozen during TOTOTO TIME.
-- At 100: **TOTOTO TIME, 6 s.** Invincible; touching any hazard smashes it (+50, 30 ms hit-stop); pits bridged; score x2; all music layers; speed lines; warm vignette. Speed is unchanged.
-- Last 1.5 s: Toto blinks, music filter closes as warning. On exit: every hazard within 500 u ahead poofs away, 1.0 s invulnerability, meter = 0, next chunk is a breather.
+- Meter 0–100: mango +0.4, drum bounce +5, BOOM bounce +10, stomp +8, near miss +8, melon slam-burst +4, golden +15, hazard cleared +2 (a lethal hazard passed unhit, or a pit cleared by landing beyond it), boing 0 (it scores, but never feeds the meter: no slam -> boing mash fever). Decays 1.5/s while grounded or on a chainless flight, never during a chain. Frozen during TOTOTO TIME. Natural fills cannot start TOTOTO TIME before 15 s of run time (the meter holds at 99.9). Tuning target (config.ts note): first fever at ~43 s median for a player who lands on the ground drums, ~113 s for the ground-only autopilot.
+- At 100: **TOTOTO TIME, 6 s.** Entry beat: 180 ms hit-stop, shake +0.5, warm flash, "TOTOTO TIME!" banner (pops 0 -> 1.3 -> 1, gone by 1.25 s; centred at 22% of the view height and moved above Toto when a high bounce would reach it; a phase banner it would overlap cross-fades out under it). Invincible; touching any hazard smashes it (+50, 40 ms hit-stop, shake +0.15); pits bridged; score x2; all music layers; speed lines; warm vignette. Speed is unchanged.
+- **Smash lane:** at fever start a lane of 4–10 thorn bushes is laid from 1080 u ahead (past the right edge of the widest view, so it never pops in on screen and is identical on every screen size), every 0.45 s of travel (tightened to 0.30 s if fewer than 4 fit), sliding past course objects with 24 u of clear ground, the last one reached >= 0.3 s before the fever ends; 3 mangoes between neighbours. Lane bushes and mangoes still ahead poof away when the fever ends.
+- Last 1.5 s: Toto blinks, music filter closes as warning. On exit: every hazard within 500 u ahead poofs away, 1.0 s invulnerability, meter = 0, and the next generated chunk is a breather (exactly one per fever).
 
 ### 6.3 Near miss
-While a hazard overlaps the hero's x-range (extended 14 u), track minimum clearance between hitbox and hurtbox. If it passes with no hit and min clearance <= 14 u: "CLOSE!" +25 x mult, groove +5, sweat drop, 0.6x time for 80 ms (skipped in reduced motion). Once per hazard. Not during TOTOTO TIME.
+While a hazard overlaps the hero's x-range (extended 14 u), track minimum clearance between hitbox and hurtbox. If it passes with no hit and min clearance <= 14 u: "CLOSE!" +25 x mult, groove +8 (on top of the +2 hazard-cleared), sweat drop, 0.6x time for 80 ms (skipped in reduced motion). Once per hazard. Not during TOTOTO TIME.
 
 ### 6.4 Power-ups (2 pickups + 1 earned)
-Pickups float in a soap bubble 70 u above ground (any hop collects), only inside breather chunks, never within 0.8 s of a hazard, never two on screen.
-1. **Mud Coat (shield).** Toto gets brown mud with drips. Absorbs one hit (hazard destroyed, mud splatter, 80 ms hit-stop, 1.0 s blinking invulnerability, chain kept) or one pit sink (geyser launches him at `vy = -1100`). No timer, max one. First one is guaranteed in the first breather after 12 s of every run; afterwards one per ~35 s while none is held.
+Pickups float in a 40 u soap bubble centred 92 u above ground (bottom >= 68 u, above the standing pickup box: running under it misses, any hop including a tap collects), only inside breather chunks, never within 0.8 s of a hazard, never two on screen.
+1. **Mud Coat (shield).** Toto gets brown mud with drips. Absorbs one hit (hazard destroyed, mud splatter, 80 ms hit-stop, 1.0 s blinking invulnerability, chain kept) or one pit sink (geyser launches him at `vy = -1100`). No timer, max one. First one is guaranteed in every run: once 12 s have passed, the next breather carries it, forced after 3 hazard chunks or by 20 s at the latest; afterwards one per ~60 s while none is held.
 2. **Fruit Magnet (drum-stick charm).** 8 s. Mangoes within 220 u accelerate toward Toto at 2400 u/s^2. Every ~45 s, not before 40 s. HUD shows a shrinking ring. First feature to cut.
 3. **TOTOTO TIME** (6.2), earned only.
 
 ### 6.5 Death and retry
 - One hit ends the run (unless Mud Coat / invulnerable / TOTOTO TIME).
-- Sequence: 120 ms hit-stop -> 0.5 s at 0.25x while Toto tumbles and sits with orbiting stars, music low-passes to 300 Hz -> summary card bounces in at ~0.9 s after the hit -> input accepted 0.5 s after the card appears. One input restarts; running again within 300 ms of that input, no reload, music keeps going.
-- Caption by cause (pick at random from 2–3 each), e.g. bush: "Toto found the pointy bit."; mound: "The termites send their regards."; hornbill: "The hornbill is not sorry."; log: "Timber: 1. Toto: 0."; pit: "Toto decided this mud was a fine bed."
+- Sequence: 120 ms hit-stop -> 0.5 s at 0.25x while Toto tumbles and sits with orbiting stars, music low-passes to 300 Hz -> summary card bounces in 0.65 s (real) after the hit -> input accepted 0.35 s after the card appears. One input restarts; running again within 300 ms of that input, no reload, music keeps going.
+- Caption by cause (pick at random from 3 each), e.g. bush: "Toto found the pointy bit."; mound: "The termites send their regards."; hornbill: "The hornbill is not sorry."; log: "Timber: 1. Toto: 0."; pit: "Toto decided this mud was a fine bed."
+- Contextual captions on a player's first 5 runs: a mound death says "Hold longer to jump higher."; coming down on a bush from a hop, or landing just short of it (pressed too early), says "Tap a little later, or hold to jump farther."
 
 ---
 
@@ -176,14 +189,16 @@ Pickups float in a soap bubble 70 u above ground (any hop collects), only inside
 
 - Speed: section 4. Jump physics never change.
 - **Rest gap** appended after every chunk: `restGap = lerp(0.95, 0.50, clamp(t / 120, 0, 1))` seconds (x v). Hard floor 0.50 s.
-- **Tier weights** by distance d (metres), linear between keys: `0 m: T1 100%` | `120 m: T1 70 / T2 30` | `500 m: 30 / 50 / 20` | `1000 m+: 10 / 40 / 50`. A template is eligible only if all its hazard types are unlocked.
-- **Breathers:** after every 4 hazard chunks (5 after 500 m) one breather chunk (drums, melons, mangoes only, 2.2–3.0 s). Also immediately after TOTOTO TIME. Pickups spawn only here.
-- **Opening (every run):** first 5 s hazard-free: a mango hop arc at 1.2 s, one ground drum at 2.6 s with a mango arc showing the jump onto it and the bounce off it. First thorn bush no earlier than 5.0 s.
-- **First-ever run (no save data) additionally:**
-  - Ghost prompt "TAP" (or "SPACE" if last input was keyboard) pulsing before the first bush. Teaching freeze: if no jump has started by 0.45 s before contact, `timeScale` eases to 0.15 until ACTION is pressed (max 4 s), then eases back over 0.3 s.
-  - Prompt "TAP AGAIN IN THE AIR = SLAM" above a guaranteed drum pair at ~9 s.
-  - Prompt "TAP AS YOU LAND = BOING!" under a guaranteed golden mango at ~14 s.
-  - Prompts stop after 20 s; `tutorialSeen` saved at first game over.
+- **Tier weights** by distance d (metres), linear between keys: `0 m: T1 100%` | `120 m: T1 70 / T2 30` | `500 m: 30 / 50 / 20` | `1000 m: 10 / 40 / 50` | `1600 m+: 0 / 30 / 70`. A template is eligible only if all its hazard types are unlocked.
+- **Breathers:** after every 4 hazard chunks (5 after 500 m) one breather chunk (drums, melons, mangoes only, 2.2–3.0 s). Also exactly one immediately after each TOTOTO TIME. Pickups spawn only here.
+- **Opening (every run):** first 5 s hazard-free: a mango hop arc at 1.2 s, one ground drum at 2.6 s with a mango arc showing the jump onto it and the bounce off it. First thorn bush no earlier than 5.0 s. Then the lesson chunk: first bush ~5.5 s, drum pair ~9 s, golden mango on the BOING line ~14 s (returning players skip the BOING line; normal fill starts ~3.5 s earlier).
+- **Prompts** (one at a time, priority TAP > SLAM/DRUM > BOING > HOLD; text follows the last input device, keyboard variants in brackets). First-ever run (no save data / `tutorialSeen` false):
+  - **TAP** ("SPACE") pulsing over the first bush. Teaching freeze: if no jump has started 0.3 s before contact, `timeScale` eases (0.12 s) to **0.02x** until ACTION is pressed (max 4 s real), then eases back over 0.3 s. Assisted jump: a ground jump pressed within 0.4 s of that bush is never cut, so any tap clears it (also in reduced motion, which has no freeze).
+  - **JUMP ON THE DRUM** before the lesson drum pair while grounded, then **TAP AGAIN NOW = SLAM** ("SPACE AGAIN NOW = SLAM") on Toto near the apex after the first drum bounce, with a lesson slow-mo of 0.25x for up to 1.0 s (ends on press).
+  - **TAP NOW = BOING!** ("SPACE NOW = BOING!") on Toto during any slam onto plain ground (or the post-impact window), and over the golden mango on the BOING line while airborne; the first one (after the TAP bush) gets 0.25x lesson slow-mo for up to 0.6 s.
+  - Prompts stop after 45 s; `tutorialSeen` saved at first game over.
+- **Contextual help on later runs:** runs 1–3 show **HOLD = HIGHER** ("HOLD SPACE = HIGHER") over the first mound; runs 1–5 get the teaching death captions (section 6.5).
+- Reduced motion: no freeze and no lesson slow-mo (prompts stay).
 - New hazard type's first appearance in a run is always its solo intro template.
 
 ---
@@ -193,7 +208,7 @@ Pickups float in a soap bubble 70 u above ground (any hop collects), only inside
 ### 8.1 Model
 - Seeded `mulberry32`. Seed = `opts.seed` ?? URL `?seed=N` ?? `Date.now() >>> 0`. A second independent RNG stream (seed ^ 0x9E3779B9) drives cosmetics (particles, blinks, decoration) so visuals never perturb the course. Same seed + same inputs = same run.
 - Templates are authored in SECONDS. At spawn, `x = cursorX + t * v` with `v` = current speed sampled once per chunk. Pit widths, drum spacings and mango arcs are computed from `v` and the physics constants, so patterns stay solvable at every speed by construction.
-- The spawner keeps content generated to `cameraRight + 1.5 * viewW`; nothing ever spawns on screen. Entities are recycled 200 u past the left edge.
+- The spawner keeps content generated to the fixed horizon `hero.x + 3000 u` (>= `cameraRight + 1.5 * viewW` for every view, and view-independent so the course is identical on every screen); nothing ever spawns on screen. Entities are recycled 200 u past the left edge.
 - Selection: filter by unlocks -> pick tier by weights -> weighted random among that tier excluding the last 2 template ids -> apply variants (bush<->mound swap where flagged and unlocked, +/-6% jitter on optional items only, optional golden mango flag with p = 0.3) -> append rest gap.
 - Moving hazards spawn at `x = xIntended + relSpeed * (xIntended - heroWorldX) / v` so they arrive where the template intends.
 
@@ -276,8 +291,8 @@ Expressions: run (serious brow), jump (mouth "o"), slam (eyes "> <", puffed chee
 ## 10. Juice (priority order; build top-down)
 
 1. Squash/stretch spring on Toto (k = 380, damping = 22; reduce to a simple 120 ms ease if it misbehaves): takeoff 0.82x/1.22y; landing `1 + min(0.4, vy/2600)` wide; slam impact 1.5x/0.55y; boing 0.72x/1.34y.
-2. Hit-stop (sim frozen, particles/shake continue): slam impact 60 ms, BOOM bounce 50 ms, stomp 40 ms, fever smash 30 ms, shield break 80 ms, death 120 ms.
-3. Trauma screen shake: `offset = 12 u * trauma^2` using summed sines, decay 2.2/s. Slam +0.35, BOOM +0.3, stomp +0.2, shield +0.5, death +0.7.
+2. Hit-stop (sim frozen, particles/shake continue): slam impact 60 ms, BOOM bounce 50 ms, stomp 40 ms, fever smash 40 ms, TOTOTO TIME entry 180 ms, shield break 80 ms, death 120 ms.
+3. Trauma screen shake: `offset = 12 u * trauma^2` using summed sines, decay 2.2/s. Slam +0.35, BOOM +0.3, stomp +0.2, fever smash +0.15, TOTOTO TIME entry +0.5, shield +0.5, death +0.7.
 4. Drum skin dent/wobble + coloured ring + chain note. Chain counter "x3" beside Toto in the step hue while a chain is alive.
 5. Slam shockwave ring (0 -> 120 u in 0.22 s), 12 dust/pebble particles, mango pull.
 6. Bandana ribbon; footstep dust puffs every other footfall; run cycle driven by distance.
@@ -334,10 +349,10 @@ Chain: `sfxBus (0.7)` + `musicBus (0.32)` -> `musicFilter (lowpass)` on music on
 
 Font stack: `ui-rounded, "SF Pro Rounded", "Segoe UI", system-ui, sans-serif`, bold, light fill over 4 u dark stroke. Canvas buttons are a small array of `{id, x, y, w, h, label, visible}` hit-tested on pointerdown; keyboard shortcuts cover every button.
 
-- **Title.** Live scene: Toto idle-bouncing on a drum, parallax drifting. Logo "HIPPO TOTOTO" in chunky letters bouncing one by one in to-to-to rhythm, subtitle "Stomp the Beat". Two-line how-to: "TAP: jump" / "TAP in the air: SLAM · TAP on landing: BOING". Pulsing "Tap or press Space". Best score + medal. Toggle buttons: Sound, Reduced motion.
+- **Title.** Live scene: Toto idle-bouncing on a drum, parallax drifting. Logo "HIPPO TOTOTO" in chunky letters bouncing one by one in to-to-to rhythm, subtitle "Stomp the Beat". Two-line how-to: "TAP: jump · HOLD: higher" / "TAP in the air: SLAM · SLAM, then TAP: BOING". Pulsing "Tap or press Space". Best score + medal. Toggle buttons: Sound, Reduced motion.
 - **HUD.** Top-left: score (large, tabular), distance "412 m" and best beneath. Top-centre: Groove meter bar (min(280, 0.4 * viewW) wide) labelled "GROOVE", becomes a countdown bar during TOTOTO TIME. Next to Toto: chain "x3" while alive. Icons by the score: Mud Coat, magnet ring. Top-right: pause and mute buttons (48 CSS px, inside safe area). Portrait: same layout; one-time 3 s hint "Rotate for a wider view".
 - **Pause** (P/Esc/button/auto on blur, visibilitychange, resize): dimmed scene, "PAUSED", Resume / Restart / Sound / Reduced motion. Never auto-resumes. Resume shows 3-2-1 (0.4 s each) before the sim continues.
-- **Game over / run summary.** Card: caption, score count-up (0.8 s), "NEW BEST!" burst or "Only 86 m short of your best", distance, best chain, mangoes, stomps, medal, next-goal line, big "Tap / Space to retry". Standalone only: "Copy score" button (clipboard in try/catch).
+- **Game over / run summary.** Card (0.65 s after the hit; retry accepted 0.35 s later): caption, score count-up (0.8 s), "NEW BEST!" burst or "Only 86 m short of your best", distance, best chain, mangoes, stomps, medal (no medal yet: the goal block is centred with "Bronze medal at 1,500"), next-goal line, big "Tap / Space to retry". Standalone only: "Copy score" button (clipboard in try/catch).
 - State machine: `title -> playing -> (paused <-> playing) -> dying -> gameover -> playing`.
 
 ---
@@ -372,6 +387,8 @@ components/hippo-run/
   render.ts       // background, entities, hero, particles
   ui.ts           // HUD, screens, canvas buttons
   game.ts         // state machine, loop, debug API
+  (shipped helpers: types, state, geom, world-gen, world-sim, render-world/-entities/-toto/-util,
+   ui-paint, audio-music/-synth, fx; ownership + wiring in CONTRACTS.md)
   hippo-run-client.tsx   // 'use client' React mount (the only file importing React)
 app/play/page.tsx        // server component: metadata + <HippoRunClient />
 scripts/build-standalone.mjs
@@ -424,8 +441,9 @@ export function createGame(canvas: HTMLCanvasElement, opts?: GameOptions): GameH
   setInvincible(on: boolean): void;
 }
 ```
-- Autopilot: looks at the next lethal hazard/pit; jumps (full hold) when the time to the hazard's leading edge <= 0.30 s (pits: at the lip minus 12 u; moving hazards: use closing speed); never jumps while a low hornbill would intersect the arc. It doubles as the generator's fairness test.
-- URL params (both builds): `?seed=N`, `?debug=1` (draw hitboxes, template id, speed, fps).
+- Shipped extras (additive): `getState()` also returns `heroX, timeScale, hitStop, trauma, feverT, phase, phasesSeen, bestPassed, tutorial, freeze, presses, muted, reducedMotion, best, bestDist, viewW, viewH, heroScreenX, scale`; `getEntities()`, `getButtons()` (CSS px), `setGroove(v)` (100 starts TOTOTO TIME on the next step, ignoring the 15 s floor).
+- Autopilot: looks at the next lethal hazard/pit; jumps (full hold) when the time to the hazard's leading edge <= 0.30 s (pits: at the lip minus 12 u; moving hazards: use closing speed); never jumps while a low hornbill would intersect the arc; tap-hops for a power-up bubble 0.2 s ahead. It doubles as the generator's fairness test.
+- URL params (both builds): `?seed=N`, `?debug=1` (draw hitboxes, template id, speed, fps), `?gallery=1` (one of every entity kind ahead of the hero, invincible; the art test bench).
 
 ### 14.7 React mount
 - `app/play/page.tsx` (server component): `export const metadata = { title: 'Hippo Tototo — Play', description: ... }`; renders `<HippoRunClient />`.
@@ -438,11 +456,13 @@ export function createGame(canvas: HTMLCanvasElement, opts?: GameOptions): GameH
 - Emit one IIFE with a ~25-line module registry: `const defs = { 'config': function(module, exports, require) {...}, ... }`, `require` normalises `./name`, caches exports. Entry: `require('index').createGame(document.getElementById('game'), { standalone: true })`.
 - Drop the whitespace between tokens (line breaks kept so ASI is unchanged; the re-parsed token stream must match, else only strip indentation) to stay well under 400 KB.
 - Escape `</script` in the bundled code. Write `public/play.html`: doctype, `<meta charset>`, `<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">`, `<title>`, inline CSS (`html,body{margin:0;height:100%;background:#0B0B1E;overflow:hidden}` canvas `width:100vw;height:100dvh;display:block;touch-action:none`), one canvas, the inline script. No external URLs of any kind.
-- `package.json` scripts: `"build:play": "node scripts/build-standalone.mjs"` and `"prebuild": "node scripts/build-standalone.mjs"`. Commit the generated `public/play.html`.
+- `package.json` scripts: `"build:play": "node scripts/build-standalone.mjs"` and `"prebuild": "node scripts/build-standalone.mjs"`. Commit the generated `public/play.html`. `--out path` writes a scratch bundle elsewhere (test it with `node scripts/playtest.mjs --no-next --file path`).
 
 ---
 
 ## 15. Acceptance criteria (all testable)
+
+All of these are automated in `scripts/playtest.mjs` (~200 checks across both builds; see "How to run").
 
 Build
 - [ ] `pnpm build` succeeds with zero type errors; `/play` is in the route list.
@@ -452,7 +472,7 @@ Build
 
 Runtime
 - [ ] Zero console errors or warnings on load, through a full run, pause/resume, death and 5 consecutive retries, in both builds.
-- [ ] `getState().fps` >= 55 average over 30 s at 1280x720 and at 390x844 (DPR 2) in Playwright Chromium; no per-frame allocations visible as a sawtooth in a 30 s heap timeline.
+- [ ] `getState().fps` >= 55 average over 30 s at 1280x720 and at 390x844 (DPR 2) in Playwright Chromium; no per-frame allocations visible as a sawtooth in a 30 s heap timeline; no retained heap growth once warmed up (the suite soaks every phase and content type first, then compares two 20 s windows after forced GC).
 - [ ] Portrait 390x844 and landscape 1366x768 both show the ground, Toto, HUD and >= 593 u of look-ahead; no page scroll, no pinch zoom, no text selection, no context menu.
 - [ ] Hidden tab or window blur pauses within one frame; it never auto-resumes; resume shows 3-2-1.
 - [ ] Mounting, destroying and re-mounting (StrictMode) leaves exactly one rAF loop, one AudioContext and one set of listeners.
@@ -465,7 +485,7 @@ Game rules
 - [ ] `setAutopilot(true)` (ground jumps only, no invincibility) survives >= 90 s on seeds 1–10 using `advance()`. Any failure is a generator fairness bug (or a bot bug) and must be fixed, not waived.
 - [ ] `setInvincible(true)` soak: `advance(600)` completes without exceptions; `entities` stays <= pool size; all four day phases were entered.
 - [ ] Tap = short hop (apex 60–90 u), hold = full jump (apex 150–160 u), measured via `heroY`.
-- [ ] A press less than 0.12 s after takeoff does not slam; a press inside the final 0.11 s of a fall produces a jump on landing, not a slam.
+- [ ] A press less than 0.12 s after takeoff does not slam (shipped lockout 0.18 s); a press inside the final 0.11 s of a fall produces a jump on landing, not a slam.
 - [ ] Slam -> press -> BOING reaches an apex >= 230 u. Slam onto a drum gives a BOOM bounce and chain +2. Landing on the ground resets `chain` to 0.
 - [ ] Slamming into a mud pit bounces Toto out once; falling in without slamming ends the run (or consumes the Mud Coat).
 - [ ] Groove meter reaching 100 starts TOTOTO TIME for 6 s, during which no hazard can end the run, and no hazard exists within 500 u ahead at its end.

@@ -1,7 +1,8 @@
 /**
  * Background + ground layers (spec §9): sun/moon arc, stars, clouds, distant festival kites,
  * far mesas (0.10), hills (sum of 3 sines, 0.25), acacias / rocks / the odd giraffe (0.50),
- * gameplay ground (1.0), foreground tufts (1.3, 60% alpha), night fireflies. Owner: ART engineer.
+ * gameplay ground (1.0; its deep soil carries low-contrast roots, pebbles, fossils and critter
+ * burrows for portrait phones), foreground tufts (1.3, 60% alpha), night fireflies. Owner: ART engineer.
  *
  * Decoration is a pure function of (tile index, layer salt) via rng.hash01 — deterministic,
  * infinite, zero storage. Background layers carry no outline. Colours come from the precomputed
@@ -72,6 +73,26 @@ const SALT_KITE = 53;
 const SALT_STAR = 61;
 const SALT_FLY = 67;
 const SALT_SPECK = 71;
+const SALT_SOIL = 79;
+const SALT_ROOT = 83;
+
+/* Deep-soil decoration (scroll 1.0, portrait shows a lot of soil): one item per tile and slot. */
+const SOIL_TILE = 130;
+/** Soil depth (u) per stacked slot of items: landscape gets one row, portrait phones three. */
+const SOIL_SLOT_H = 170;
+/** Items start this far below the trail and stop this far above the view's bottom edge. */
+const SOIL_TOP = 44;
+const SOIL_BOTTOM = 16;
+const SOIL_PEBBLES = 1;
+const SOIL_BONE = 2;
+const SOIL_SHELL = 3;
+/** Top slot only. */
+const SOIL_BURROW = 4;
+/** Low-contrast: decoration never competes with gameplay. */
+const SOIL_DARK_A = 0.32;
+const SOIL_PALE_A = 0.3;
+const SOIL_STONE_A = 0.55;
+const SOIL_EYE_A = 0.7;
 
 const KITE_COLORS: ReadonlyArray<string> = CHAIN_HUES;
 const SUN_CORE = '#FFF7D6';
@@ -574,6 +595,210 @@ export function drawGround(ctx: CanvasRenderingContext2D, b: BgFrame, t: PhaseTa
   }
   ctx.fill();
   ctx.globalAlpha = 1;
+  drawSoilDecor(ctx, b, t, gy, lx);
+}
+
+/** Per-frame scratch for drawSoilDecor (module-level typed arrays: the frame path never allocates). */
+const SOIL_MAX = 160;
+/** kind, x, y, a, c per item. */
+const soilBuf = new Float64Array(SOIL_MAX * 5);
+const STONE_MAX = 200;
+/** x, y, r, rot per pebble. */
+const stoneBuf = new Float64Array(STONE_MAX * 4);
+
+/**
+ * Deep-soil decoration under the trail (scroll 1.0, so it reads as the same ground): hanging
+ * roots, pebble clusters, fossil bones and ammonite shells, critter burrows (top slot, tunnel up
+ * to the trail) with eyes that blink and now and then duck away. Pure function of (tile index,
+ * slot, salt) via hash01, gathered once into scratch arrays and drawn in 8 batched paths at low
+ * alpha in the phase's soil colours; pits are drawn on top and hide it.
+ */
+function drawSoilDecor(ctx: CanvasRenderingContext2D, b: BgFrame, t: PhaseTable, gy: number, lx: number): void {
+  const k = b.key;
+  const depth = b.viewH - gy;
+  if (depth < 40) return;
+  const i0 = Math.floor((lx - 70) / SOIL_TILE);
+  const i1 = Math.floor((lx + b.viewW + 70) / SOIL_TILE);
+  const dark = t.groundDark[k];
+  const pale = t.groundLight[k];
+  const cap = ctx.lineCap;
+  const join = ctx.lineJoin;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  // roots hanging under the trail, each with one rootlet
+  ctx.strokeStyle = dark;
+  ctx.globalAlpha = SOIL_DARK_A + 0.08;
+  ctx.lineWidth = 2.2;
+  ctx.beginPath();
+  for (let i = i0; i <= i1; i++) {
+    if (hash01(i, SALT_ROOT, 0) > 0.42) continue;
+    let len = 20 + hash01(i, SALT_ROOT, 1) * 30;
+    if (len > depth - 34) len = depth - 34;
+    if (len < 10) continue;
+    const x = i * SOIL_TILE + hash01(i, SALT_ROOT, 2) * SOIL_TILE - lx;
+    const bend = (hash01(i, SALT_ROOT, 3) - 0.5) * 16;
+    const y0 = gy + 15;
+    ctx.moveTo(x, y0);
+    ctx.quadraticCurveTo(x + bend, y0 + len * 0.55, x + bend * 0.3, y0 + len);
+    const side = bend > 0 ? -1 : 1;
+    const mx = x + bend * 0.45;
+    const my = y0 + len * 0.45;
+    ctx.moveTo(mx, my);
+    ctx.quadraticCurveTo(mx + side * 6, my + 2, mx + side * 10, my + 9);
+  }
+  ctx.stroke();
+
+  const top = gy + SOIL_TOP;
+  const avail = b.viewH - SOIL_BOTTOM - top;
+  if (avail >= 24) {
+    let slots = Math.round(avail / SOIL_SLOT_H);
+    if (slots < 1) slots = 1;
+    const slotH = avail / slots;
+
+    // Gather: one item per (tile, slot). Burrows only in the top slot (their tunnel climbs to the
+    // trail); deeper slots get fossils in their place.
+    let n = 0;
+    let ns = 0;
+    for (let i = i0; i <= i1 && n < SOIL_MAX; i++) {
+      for (let s = 0; s < slots && n < SOIL_MAX; s++) {
+        const id = i * 16 + s;
+        const h0 = hash01(id, SALT_SOIL, 0);
+        if (h0 >= 0.58) continue;
+        let kind = SOIL_PEBBLES;
+        if (h0 >= 0.49) kind = s === 0 ? SOIL_BURROW : h0 < 0.535 ? SOIL_BONE : SOIL_SHELL;
+        else if (h0 >= 0.41) kind = SOIL_SHELL;
+        else if (h0 >= 0.3) kind = SOIL_BONE;
+        const x = i * SOIL_TILE + 24 + hash01(id, SALT_SOIL, 1) * (SOIL_TILE - 48) - lx;
+        const y = top + s * slotH + 12 + hash01(id, SALT_SOIL, 2) * (slotH - 24);
+        const a = hash01(id, SALT_SOIL, 3);
+        const c = hash01(id, SALT_SOIL, 4);
+        const o = n * 5;
+        soilBuf[o] = kind;
+        soilBuf[o + 1] = x;
+        soilBuf[o + 2] = y;
+        soilBuf[o + 3] = a;
+        soilBuf[o + 4] = c;
+        n++;
+        if (kind !== SOIL_PEBBLES) continue;
+        const m = 2 + Math.floor(a * 3);
+        for (let j = 0; j < m && ns < STONE_MAX; j++) {
+          const q = ns * 4;
+          stoneBuf[q] = x + (j - (m - 1) * 0.5) * 12 + (hash01(id, SALT_SOIL, 9 + j) - 0.5) * 6;
+          stoneBuf[q + 1] = y + (hash01(id, SALT_SOIL, 13 + j) - 0.5) * 8;
+          stoneBuf[q + 2] = 3.5 + hash01(id, SALT_SOIL, 5 + j) * 4.5;
+          stoneBuf[q + 3] = (c - 0.5) * 0.5;
+          ns++;
+        }
+      }
+    }
+
+    // burrow tunnels: an S-curve from the chamber up to the underside of the trail
+    const tunnelTop = gy + 18;
+    ctx.lineWidth = 6.5;
+    ctx.globalAlpha = SOIL_DARK_A * 0.8;
+    ctx.beginPath();
+    for (let e = 0; e < n * 5; e += 5) {
+      if (soilBuf[e] !== SOIL_BURROW) continue;
+      const x = soilBuf[e + 1];
+      const y = soilBuf[e + 2];
+      const dir = soilBuf[e + 3] < 0.5 ? -1 : 1;
+      const ex = x + dir * (18 + soilBuf[e + 4] * 30);
+      const rise = y - tunnelTop;
+      ctx.moveTo(x + dir * 4, y);
+      ctx.bezierCurveTo(x - dir * 16, y - rise * 0.5, ex + dir * 14, tunnelTop + rise * 0.45, ex, tunnelTop);
+    }
+    ctx.stroke();
+    // burrow chambers
+    ctx.fillStyle = dark;
+    ctx.globalAlpha = SOIL_DARK_A + 0.2;
+    ctx.beginPath();
+    for (let e = 0; e < n * 5; e += 5) {
+      if (soilBuf[e] === SOIL_BURROW) oval(ctx, soilBuf[e + 1], soilBuf[e + 2], 12, 8, 0);
+    }
+    ctx.fill();
+
+    // pebble clusters (2-4 stones)
+    ctx.fillStyle = t.groundEdge[k];
+    ctx.globalAlpha = SOIL_STONE_A;
+    ctx.beginPath();
+    for (let q = 0; q < ns * 4; q += 4) {
+      const r = stoneBuf[q + 2];
+      oval(ctx, stoneBuf[q], stoneBuf[q + 1], r * 1.3, r * 0.85, stoneBuf[q + 3]);
+    }
+    ctx.fill();
+
+    // pale: pebble highlights + fossil bones (one nonzero fill: overlaps never double the alpha)
+    ctx.fillStyle = pale;
+    ctx.globalAlpha = SOIL_PALE_A;
+    ctx.beginPath();
+    for (let q = 0; q < ns * 4; q += 4) {
+      const r = stoneBuf[q + 2];
+      oval(ctx, stoneBuf[q] - r * 0.35, stoneBuf[q + 1] - r * 0.3, r * 0.5, r * 0.28, -0.2);
+    }
+    for (let e = 0; e < n * 5; e += 5) {
+      if (soilBuf[e] !== SOIL_BONE) continue;
+      const ang = (soilBuf[e + 3] - 0.5) * 1.4;
+      const half = 13 + soilBuf[e + 4] * 7;
+      const cx = Math.cos(ang);
+      const sy = Math.sin(ang);
+      const hw = 2.2;
+      const x1 = soilBuf[e + 1] - cx * half;
+      const y1 = soilBuf[e + 2] - sy * half;
+      const x2 = soilBuf[e + 1] + cx * half;
+      const y2 = soilBuf[e + 2] + sy * half;
+      // shaft wound the same way as arc() so the nonzero fill unions it with the knobs
+      ctx.moveTo(x1 - sy * hw, y1 + cx * hw);
+      ctx.lineTo(x1 + sy * hw, y1 - cx * hw);
+      ctx.lineTo(x2 + sy * hw, y2 - cx * hw);
+      ctx.lineTo(x2 - sy * hw, y2 + cx * hw);
+      ctx.closePath();
+      dot(ctx, x1 - sy * 2.8 - cx * 1.5, y1 + cx * 2.8 - sy * 1.5, 3.3);
+      dot(ctx, x1 + sy * 2.8 - cx * 1.5, y1 - cx * 2.8 - sy * 1.5, 3.3);
+      dot(ctx, x2 - sy * 2.8 + cx * 1.5, y2 + cx * 2.8 + sy * 1.5, 3.3);
+      dot(ctx, x2 + sy * 2.8 + cx * 1.5, y2 - cx * 2.8 + sy * 1.5, 3.3);
+    }
+    ctx.fill();
+
+    // ammonite shells: ring + inward spiral
+    ctx.strokeStyle = pale;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let e = 0; e < n * 5; e += 5) {
+      if (soilBuf[e] !== SOIL_SHELL) continue;
+      const x = soilBuf[e + 1];
+      const y = soilBuf[e + 2];
+      const R = 9 + soilBuf[e + 4] * 5;
+      const rot = soilBuf[e + 3] * 6.283;
+      dot(ctx, x, y, R);
+      for (let q = 0; q <= 20; q++) {
+        const u = q / 20;
+        const ang = rot + u * 11;
+        const r = R * (0.92 - u * 0.78);
+        if (q === 0) ctx.moveTo(x + Math.cos(ang) * r, y + Math.sin(ang) * r);
+        else ctx.lineTo(x + Math.cos(ang) * r, y + Math.sin(ang) * r);
+      }
+    }
+    ctx.stroke();
+
+    // critters peeking out of their burrows (blink every few seconds, duck away now and then)
+    ctx.globalAlpha = SOIL_EYE_A;
+    ctx.beginPath();
+    for (let e = 0; e < n * 5; e += 5) {
+      if (soilBuf[e] !== SOIL_BURROW) continue;
+      const a = soilBuf[e + 3];
+      const tt = b.time + soilBuf[e + 4] * 17;
+      if (Math.sin(tt * 0.45 + a * 9) < -0.45) continue;
+      if (tt % (2.6 + a * 2.4) < 0.14) continue;
+      dot(ctx, soilBuf[e + 1] - 3.8, soilBuf[e + 2] - 0.5, 1.7);
+      dot(ctx, soilBuf[e + 1] + 3.8, soilBuf[e + 2] - 0.5, 1.7);
+    }
+    ctx.fill();
+  }
+
+  ctx.globalAlpha = 1;
+  ctx.lineCap = cap;
+  ctx.lineJoin = join;
 }
 
 /** Dusk tint over the gameplay ground (10% #FF7E5F), applied after pits. */

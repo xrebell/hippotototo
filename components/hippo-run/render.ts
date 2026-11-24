@@ -14,7 +14,9 @@
  *    soil extend to the full logical view (0..viewW, 0..viewH); pillarbox sides (padX > 0) are
  *    filled with VIEW.pillarColor in device space and everything else is clipped to the view.
  *  - TOTOTO TIME look (driven only by state.fever.active / .t / .introT): the sky gradient blends
- *    up to 35% toward #FF5A5F (top) -> #FFB627 (horizon), easing in over 0.4 s and out over the last
+ *    toward a per-phase festival sky (FEVER_SKY: dawn/dusk/night 35% toward #FF5A5F top -> #FFB627
+ *    horizon; noon 74% toward coral #FF6B3D -> gold #FFC24A, since a light push over bright blue mixes
+ *    to lavender), precomputed per phase-blend key at init, easing in over 0.4 s and out over the last
  *    FEVER.warn s, quantised to FEVER_SKY_STEPS and part of the sky cache key (so it is rebuilt only
  *    while that blend or the 64-step phase blend moves); the ground's top stripe brightens 15% on
  *    every beat (not in reduced motion); Toto pops 1.25x -> 1x over 0.3 s at the start (draw only,
@@ -32,7 +34,7 @@ import { DRUM, FEVER, GROUND_Y, HERO, PAL, PIT, VIEW } from './config';
 import type { FxApi, ReadState, Renderer, Rng, ViewMetrics } from './types';
 import { entityHitbox, heroHurtboxAt, makeBox } from './geom';
 import type { REntity } from './render-util';
-import { buildPhaseTable, easeOut, mixHex, oval, phaseKey, phaseWeight, smooth01 } from './render-util';
+import { buildChannel, buildPhaseTable, easeOut, mixHex, oval, phaseKey, phaseWeight, smooth01 } from './render-util';
 import type { EntFrame } from './render-entities';
 import {
   drawBestFlag,
@@ -77,11 +79,26 @@ const BUF_FY = 140;
 const DEBUG_FONT = 'bold 12px ui-monospace, Menlo, Consolas, monospace';
 
 /* TOTOTO TIME look */
-const FEVER_SKY_TOP = '#FF5A5F';
-const FEVER_SKY_BOTTOM = '#FFB627';
-/** Same 0.58 mid stop the phase skies use. */
-const FEVER_SKY_MID = mixHex(FEVER_SKY_TOP, FEVER_SKY_BOTTOM, 0.58);
-const FEVER_SKY_MIX = 0.35;
+/** Festival sky a phase's sky blends toward at full fever strength (top, horizon, how far). */
+interface FeverSky {
+  top: string;
+  bottom: string;
+  mix: number;
+}
+/**
+ * Per phase, in PHASES order. Dawn/dusk skies are warm already and night must stay dark (hazard
+ * readability), so they only get a 35% push; 35% of coral over noon's bright blue reads lavender,
+ * so noon mostly swaps to a coral -> gold festival sky.
+ */
+const FEVER_SKY: ReadonlyArray<FeverSky> = [
+  { top: '#FF5A5F', bottom: '#FFB627', mix: 0.35 },
+  { top: '#FF6B3D', bottom: '#FFC24A', mix: 0.74 },
+  { top: '#FF5A5F', bottom: '#FFB627', mix: 0.35 },
+  { top: '#FF5A5F', bottom: '#FFB627', mix: 0.35 },
+];
+function feverSkyDef(i: number): FeverSky {
+  return FEVER_SKY[i] || FEVER_SKY[0];
+}
 const FEVER_SKY_STEPS = 16;
 const FEVER_EASE_IN = 0.4;
 /** A fever that ends early (restart) still fades the sky out over this long instead of popping. */
@@ -128,6 +145,13 @@ function makeGlow(doc: Document, size: number, c0: string, c1: string, c2: strin
 
 export function createRenderer(ctx: CanvasRenderingContext2D, fx: FxApi, crng: Rng): Renderer {
   const table = buildPhaseTable();
+  // Full-strength festival sky per phase-blend key (init only; the 0.58 mid stop matches the phase skies).
+  const feverTop = buildChannel((p, i) => mixHex(p.skyTop, feverSkyDef(i).top, feverSkyDef(i).mix));
+  const feverMid = buildChannel((p, i) => {
+    const f = feverSkyDef(i);
+    return mixHex(mixHex(p.skyTop, p.skyBottom, 0.58), mixHex(f.top, f.bottom, 0.58), f.mix);
+  });
+  const feverBottom = buildChannel((p, i) => mixHex(p.skyBottom, feverSkyDef(i).bottom, feverSkyDef(i).mix));
   const ef: EntFrame = makeEntFrame();
   const bg = makeBgFrame();
   const tv = makeTotoView();
@@ -572,10 +596,10 @@ export function createRenderer(ctx: CanvasRenderingContext2D, fx: FxApi, crng: R
           g.addColorStop(1, table.skyBottom[key]);
         } else {
           // Cache miss only (a new gradient is built here anyway): mix toward the festival sky.
-          const m = (fs / FEVER_SKY_STEPS) * FEVER_SKY_MIX;
-          g.addColorStop(0, mixHex(table.skyTop[key], FEVER_SKY_TOP, m));
-          g.addColorStop(0.62, mixHex(table.skyMid[key], FEVER_SKY_MID, m));
-          g.addColorStop(1, mixHex(table.skyBottom[key], FEVER_SKY_BOTTOM, m));
+          const m = fs / FEVER_SKY_STEPS;
+          g.addColorStop(0, mixHex(table.skyTop[key], feverTop[key], m));
+          g.addColorStop(0.62, mixHex(table.skyMid[key], feverMid[key], m));
+          g.addColorStop(1, mixHex(table.skyBottom[key], feverBottom[key], m));
         }
         sky = g;
         skyKey = sk;

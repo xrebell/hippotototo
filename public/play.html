@@ -1646,6 +1646,7 @@ terminalVy:1500,
 jumpVy:-900,
 jumpCutVy:-420,
 jumpMinHold:0.06,
+tapAssistMax:0.135,
 coyote:0.09,
 jumpBuffer:0.13,
 smartBuffer:0.11,
@@ -1793,6 +1794,13 @@ warn:1.5,
 clearAhead:500,
 exitInvuln:1.0,
 notBefore:15,
+laneStartU:1080,
+laneStepS:0.45,
+laneMinStepS:0.3,
+laneEndS:0.3,
+laneClearU:24,
+laneMin:4,
+laneMax:10,
 };
 exports.NEAR_MISS={
 xExtend:14,
@@ -1882,6 +1890,7 @@ boingSlowMax:0.6,
 assistS:0.4,
 holdRuns:3,
 holdCaptionRuns:5,
+landedShortS:0.25,
 };
 exports.GEN={
 cosmeticXor:0x9e3779b9,
@@ -2220,6 +2229,7 @@ tutHold:'HOLD = HIGHER',
 tutHoldKey:'HOLD SPACE = HIGHER',
 tutDrum:'JUMP ON THE DRUM',
 holdCaption:'Hold longer to jump higher.',
+bushEarlyCaption:'Tap a little later, or hold to jump farther.',
 fever:'TOTOTO TIME!',
 close:'CLOSE!',
 record:'+NEW RECORD',
@@ -4035,6 +4045,8 @@ const caps=config_1.DEATH_CAPTIONS[state.deathCause!==null?state.deathCause:'bus
 sm.caption=caps[crng.int(0,caps.length-1)];
 if(state.deathCause==='mound'&&s.runs<config_1.TUTORIAL.holdCaptionRuns)
 sm.caption=config_1.UI_TEXT.holdCaption;
+if(state.deathCause==='bush'&&sim.deathFalling&&s.runs<config_1.TUTORIAL.holdCaptionRuns)
+sm.caption=config_1.UI_TEXT.bushEarlyCaption;
 if(!r.goalDone&&goalMet(sim.goalAtStart))
 r.goalDone=true;
 sm.goalDone=r.goalDone;
@@ -4510,6 +4522,8 @@ exports.stepDeadHero=stepDeadHero;
 exports.stepHero=stepHero;
 exports.stepTitleHero=stepTitleHero;
 const config_1=require("./config");
+const geom_1=require("./geom");
+const state_1=require("./state");
 const world_sim_1=require("./world-sim");
 const TWO_PI=Math.PI*2;
 exports.BODY_OFFSET=config_1.HERO.hurtBottom+config_1.HERO.hurtH/2;
@@ -4703,6 +4717,79 @@ return false;
 }
 return true;
 }
+const ASSIST_REACH_S=0.5;
+const ASSIST_PAD=1;
+const assistBox=(0,geom_1.makeBox)();
+function hopHits(state,cutAt,hb,pad){
+const h=state.hero;
+const half=config_1.HERO.hurtW/2;
+const x0=hb.x-pad;
+const x1=hb.x+hb.w+pad;
+const top=hb.y-pad;
+let alt=config_1.GROUND_Y-h.y;
+let vy=config_1.PHYS.jumpVy;
+let airT=0;
+let cut=false;
+let x=h.x;
+let t=state.run.time;
+for(let i=0;i<360;i++){
+airT+=config_1.DT;
+if(!cut&&airT>=cutAt){
+cut=true;
+if(vy<config_1.PHYS.jumpCutVy)
+vy=config_1.PHYS.jumpCutVy;
+}
+if(alt>0||vy<0){
+vy=nextVy(vy,config_1.DT);
+alt-=vy*config_1.DT;
+if(alt<=0&&vy>0){
+alt=0;
+vy=0;
+}
+}
+t+=config_1.DT;
+x+=(0,state_1.speedAt)(t)*config_1.DT;
+if(x-half>=x1)
+return false;
+if(x+half>x0&&config_1.GROUND_Y-alt-config_1.HERO.hurtBottom>top)
+return true;
+}
+return false;
+}
+function bushAwareCutAt(state){
+const def=config_1.PHYS.jumpMinHold;
+if(state.fever.active)
+return def;
+const h=state.hero;
+const back=h.x-config_1.HERO.hurtW/2;
+const reach=h.x+config_1.HERO.hurtW/2+state.run.speed*ASSIST_REACH_S;
+const ents=state.entities;
+let bush=null;
+let bushX=1e12;
+for(let i=0;i<ents.length;i++){
+const e=ents[i];
+if(!e.active||e.kind!=='bush'||e.flag!=='none')
+continue;
+(0,geom_1.entityHitbox)(e,assistBox);
+if(assistBox.x+assistBox.w<=back||assistBox.x>=reach||assistBox.x>=bushX)
+continue;
+bush=e;
+bushX=assistBox.x;
+}
+if(bush===null)
+return def;
+(0,geom_1.entityHitbox)(bush,assistBox);
+if(!hopHits(state,def,assistBox,ASSIST_PAD))
+return def;
+for(let k=1;k<64;k++){
+const c=def+k*config_1.DT;
+if(c>config_1.PHYS.tapAssistMax+1e-9)
+break;
+if(!hopHits(state,c,assistBox,ASSIST_PAD))
+return c;
+}
+return def;
+}
 function launchHero(state,sim,vy,cuttable){
 const h=state.hero;
 h.vy=vy;
@@ -4717,11 +4804,13 @@ h.postSlamT=config_1.NEVER;
 h.boingQueued=false;
 h.cutPending=false;
 sim.cuttable=cuttable;
+sim.cutAt=config_1.PHYS.jumpMinHold;
 sim.boingLaunch=false;
 }
 function doJump(state,sv,sim){
 const h=state.hero;
 launchHero(state,sim,config_1.PHYS.jumpVy,true);
+sim.cutAt=bushAwareCutAt(state);
 sim.jumped=true;
 h.cutPending=!h.held;
 h.squashX=config_1.JUICE.takeoffX;
@@ -4815,7 +4904,7 @@ const h=state.hero;
 h.held=false;
 if(!sim.cuttable||h.action!=='air'||h.vy>=0)
 return;
-if(h.airT<config_1.PHYS.jumpMinHold){
+if(h.airT<sim.cutAt){
 h.cutPending=true;
 return;
 }
@@ -4887,6 +4976,7 @@ return;
 }
 h.boingQueued=false;
 h.postSlamT=config_1.NEVER;
+sim.hopLandT=0;
 creditPitsCleared(state);
 let k=vy/config_1.JUICE.landDiv;
 if(k>config_1.JUICE.landMax)
@@ -5151,6 +5241,11 @@ h.postSlamT+=dt;
 if(h.postSlamT>1)
 h.postSlamT=config_1.NEVER;
 }
+if(sim.hopLandT<config_1.NEVER){
+sim.hopLandT+=dt;
+if(sim.hopLandT>1)
+sim.hopLandT=config_1.NEVER;
+}
 if(h.grounded){
 const pit=(0,world_sim_1.pitIndexAt)(state,h.x);
 if(pit>=0){
@@ -5172,7 +5267,7 @@ h.coyoteT+=dt;
 if(h.coyoteT>1)
 h.coyoteT=config_1.NEVER;
 }
-if(h.cutPending&&h.airT>=config_1.PHYS.jumpMinHold){
+if(h.cutPending&&h.airT>=sim.cutAt){
 h.cutPending=false;
 if(sim.cuttable&&h.vy<config_1.PHYS.jumpCutVy)
 h.vy=config_1.PHYS.jumpCutVy;
@@ -8109,6 +8204,7 @@ Object.defineProperty(exports,"__esModule",{value:true});
 exports.PHASE_STEPS=exports.TAU=void 0;
 exports.mixHex=mixHex;
 exports.rgbaHex=rgbaHex;
+exports.buildChannel=buildChannel;
 exports.buildPhaseTable=buildPhaseTable;
 exports.phaseKey=phaseKey;
 exports.phaseWeight=phaseWeight;
@@ -8148,8 +8244,8 @@ function buildChannel(fn){
 const n=config_1.PHASES.length;
 const out=[];
 for(let i=0;i<n;i++){
-const a=fn(config_1.PHASES[i]);
-const b=fn(config_1.PHASES[(i+1)%n]);
+const a=fn(config_1.PHASES[i],i);
+const b=fn(config_1.PHASES[(i+1)%n],(i+1)%n);
 for(let k=0;k<=exports.PHASE_STEPS;k++)
 out.push(mixHex(a,b,k/exports.PHASE_STEPS));
 }
@@ -8308,6 +8404,20 @@ const SALT_KITE=53;
 const SALT_STAR=61;
 const SALT_FLY=67;
 const SALT_SPECK=71;
+const SALT_SOIL=79;
+const SALT_ROOT=83;
+const SOIL_TILE=130;
+const SOIL_SLOT_H=170;
+const SOIL_TOP=44;
+const SOIL_BOTTOM=16;
+const SOIL_PEBBLES=1;
+const SOIL_BONE=2;
+const SOIL_SHELL=3;
+const SOIL_BURROW=4;
+const SOIL_DARK_A=0.32;
+const SOIL_PALE_A=0.3;
+const SOIL_STONE_A=0.55;
+const SOIL_EYE_A=0.7;
 const KITE_COLORS=config_1.CHAIN_HUES;
 const SUN_CORE='#FFF7D6';
 const MOON_CRATER='#E9DEC0';
@@ -8781,6 +8891,198 @@ ctx.moveTo(x+r*1.4,y);
 }
 ctx.fill();
 ctx.globalAlpha=1;
+drawSoilDecor(ctx,b,t,gy,lx);
+}
+const SOIL_MAX=160;
+const soilBuf=new Float64Array(SOIL_MAX*5);
+const STONE_MAX=200;
+const stoneBuf=new Float64Array(STONE_MAX*4);
+function drawSoilDecor(ctx,b,t,gy,lx){
+const k=b.key;
+const depth=b.viewH-gy;
+if(depth<40)
+return;
+const i0=Math.floor((lx-70)/SOIL_TILE);
+const i1=Math.floor((lx+b.viewW+70)/SOIL_TILE);
+const dark=t.groundDark[k];
+const pale=t.groundLight[k];
+const cap=ctx.lineCap;
+const join=ctx.lineJoin;
+ctx.lineCap='round';
+ctx.lineJoin='round';
+ctx.strokeStyle=dark;
+ctx.globalAlpha=SOIL_DARK_A+0.08;
+ctx.lineWidth=2.2;
+ctx.beginPath();
+for(let i=i0;i<=i1;i++){
+if((0,rng_1.hash01)(i,SALT_ROOT,0)>0.42)
+continue;
+let len=20+(0,rng_1.hash01)(i,SALT_ROOT,1)*30;
+if(len>depth-34)
+len=depth-34;
+if(len<10)
+continue;
+const x=i*SOIL_TILE+(0,rng_1.hash01)(i,SALT_ROOT,2)*SOIL_TILE-lx;
+const bend=((0,rng_1.hash01)(i,SALT_ROOT,3)-0.5)*16;
+const y0=gy+15;
+ctx.moveTo(x,y0);
+ctx.quadraticCurveTo(x+bend,y0+len*0.55,x+bend*0.3,y0+len);
+const side=bend>0?-1:1;
+const mx=x+bend*0.45;
+const my=y0+len*0.45;
+ctx.moveTo(mx,my);
+ctx.quadraticCurveTo(mx+side*6,my+2,mx+side*10,my+9);
+}
+ctx.stroke();
+const top=gy+SOIL_TOP;
+const avail=b.viewH-SOIL_BOTTOM-top;
+if(avail>=24){
+let slots=Math.round(avail/SOIL_SLOT_H);
+if(slots<1)
+slots=1;
+const slotH=avail/slots;
+let n=0;
+let ns=0;
+for(let i=i0;i<=i1&&n<SOIL_MAX;i++){
+for(let s=0;s<slots&&n<SOIL_MAX;s++){
+const id=i*16+s;
+const h0=(0,rng_1.hash01)(id,SALT_SOIL,0);
+if(h0>=0.58)
+continue;
+let kind=SOIL_PEBBLES;
+if(h0>=0.49)
+kind=s===0?SOIL_BURROW:h0<0.535?SOIL_BONE:SOIL_SHELL;
+else if(h0>=0.41)
+kind=SOIL_SHELL;
+else if(h0>=0.3)
+kind=SOIL_BONE;
+const x=i*SOIL_TILE+24+(0,rng_1.hash01)(id,SALT_SOIL,1)*(SOIL_TILE-48)-lx;
+const y=top+s*slotH+12+(0,rng_1.hash01)(id,SALT_SOIL,2)*(slotH-24);
+const a=(0,rng_1.hash01)(id,SALT_SOIL,3);
+const c=(0,rng_1.hash01)(id,SALT_SOIL,4);
+const o=n*5;
+soilBuf[o]=kind;
+soilBuf[o+1]=x;
+soilBuf[o+2]=y;
+soilBuf[o+3]=a;
+soilBuf[o+4]=c;
+n++;
+if(kind!==SOIL_PEBBLES)
+continue;
+const m=2+Math.floor(a*3);
+for(let j=0;j<m&&ns<STONE_MAX;j++){
+const q=ns*4;
+stoneBuf[q]=x+(j-(m-1)*0.5)*12+((0,rng_1.hash01)(id,SALT_SOIL,9+j)-0.5)*6;
+stoneBuf[q+1]=y+((0,rng_1.hash01)(id,SALT_SOIL,13+j)-0.5)*8;
+stoneBuf[q+2]=3.5+(0,rng_1.hash01)(id,SALT_SOIL,5+j)*4.5;
+stoneBuf[q+3]=(c-0.5)*0.5;
+ns++;
+}
+}
+}
+const tunnelTop=gy+18;
+ctx.lineWidth=6.5;
+ctx.globalAlpha=SOIL_DARK_A*0.8;
+ctx.beginPath();
+for(let e=0;e<n*5;e+=5){
+if(soilBuf[e]!==SOIL_BURROW)
+continue;
+const x=soilBuf[e+1];
+const y=soilBuf[e+2];
+const dir=soilBuf[e+3]<0.5?-1:1;
+const ex=x+dir*(18+soilBuf[e+4]*30);
+const rise=y-tunnelTop;
+ctx.moveTo(x+dir*4,y);
+ctx.bezierCurveTo(x-dir*16,y-rise*0.5,ex+dir*14,tunnelTop+rise*0.45,ex,tunnelTop);
+}
+ctx.stroke();
+ctx.fillStyle=dark;
+ctx.globalAlpha=SOIL_DARK_A+0.2;
+ctx.beginPath();
+for(let e=0;e<n*5;e+=5){
+if(soilBuf[e]===SOIL_BURROW)
+(0,render_util_1.oval)(ctx,soilBuf[e+1],soilBuf[e+2],12,8,0);
+}
+ctx.fill();
+ctx.fillStyle=t.groundEdge[k];
+ctx.globalAlpha=SOIL_STONE_A;
+ctx.beginPath();
+for(let q=0;q<ns*4;q+=4){
+const r=stoneBuf[q+2];
+(0,render_util_1.oval)(ctx,stoneBuf[q],stoneBuf[q+1],r*1.3,r*0.85,stoneBuf[q+3]);
+}
+ctx.fill();
+ctx.fillStyle=pale;
+ctx.globalAlpha=SOIL_PALE_A;
+ctx.beginPath();
+for(let q=0;q<ns*4;q+=4){
+const r=stoneBuf[q+2];
+(0,render_util_1.oval)(ctx,stoneBuf[q]-r*0.35,stoneBuf[q+1]-r*0.3,r*0.5,r*0.28,-0.2);
+}
+for(let e=0;e<n*5;e+=5){
+if(soilBuf[e]!==SOIL_BONE)
+continue;
+const ang=(soilBuf[e+3]-0.5)*1.4;
+const half=13+soilBuf[e+4]*7;
+const cx=Math.cos(ang);
+const sy=Math.sin(ang);
+const hw=2.2;
+const x1=soilBuf[e+1]-cx*half;
+const y1=soilBuf[e+2]-sy*half;
+const x2=soilBuf[e+1]+cx*half;
+const y2=soilBuf[e+2]+sy*half;
+ctx.moveTo(x1-sy*hw,y1+cx*hw);
+ctx.lineTo(x1+sy*hw,y1-cx*hw);
+ctx.lineTo(x2+sy*hw,y2-cx*hw);
+ctx.lineTo(x2-sy*hw,y2+cx*hw);
+ctx.closePath();
+(0,render_util_1.dot)(ctx,x1-sy*2.8-cx*1.5,y1+cx*2.8-sy*1.5,3.3);
+(0,render_util_1.dot)(ctx,x1+sy*2.8-cx*1.5,y1-cx*2.8-sy*1.5,3.3);
+(0,render_util_1.dot)(ctx,x2-sy*2.8+cx*1.5,y2+cx*2.8+sy*1.5,3.3);
+(0,render_util_1.dot)(ctx,x2+sy*2.8+cx*1.5,y2-cx*2.8+sy*1.5,3.3);
+}
+ctx.fill();
+ctx.strokeStyle=pale;
+ctx.lineWidth=2;
+ctx.beginPath();
+for(let e=0;e<n*5;e+=5){
+if(soilBuf[e]!==SOIL_SHELL)
+continue;
+const x=soilBuf[e+1];
+const y=soilBuf[e+2];
+const R=9+soilBuf[e+4]*5;
+const rot=soilBuf[e+3]*6.283;
+(0,render_util_1.dot)(ctx,x,y,R);
+for(let q=0;q<=20;q++){
+const u=q/20;
+const ang=rot+u*11;
+const r=R*(0.92-u*0.78);
+if(q===0)
+ctx.moveTo(x+Math.cos(ang)*r,y+Math.sin(ang)*r);
+else
+ctx.lineTo(x+Math.cos(ang)*r,y+Math.sin(ang)*r);
+}
+}
+ctx.stroke();
+ctx.globalAlpha=SOIL_EYE_A;
+ctx.beginPath();
+for(let e=0;e<n*5;e+=5){
+if(soilBuf[e]!==SOIL_BURROW)
+continue;
+const a=soilBuf[e+3];
+const tt=b.time+soilBuf[e+4]*17;
+if(Math.sin(tt*0.45+a*9)<-0.45)
+continue;
+if(tt%(2.6+a*2.4)<0.14)
+continue;
+(0,render_util_1.dot)(ctx,soilBuf[e+1]-3.8,soilBuf[e+2]-0.5,1.7);
+(0,render_util_1.dot)(ctx,soilBuf[e+1]+3.8,soilBuf[e+2]-0.5,1.7);
+}
+ctx.fill();
+}
+ctx.globalAlpha=1;
+ctx.lineCap=cap;
+ctx.lineJoin=join;
 }
 function drawGroundTint(ctx,b){
 const ph=config_1.PHASES[2];
@@ -8887,10 +9189,15 @@ const BUF_H=190;
 const BUF_FX=110;
 const BUF_FY=140;
 const DEBUG_FONT='bold 12px ui-monospace, Menlo, Consolas, monospace';
-const FEVER_SKY_TOP='#FF5A5F';
-const FEVER_SKY_BOTTOM='#FFB627';
-const FEVER_SKY_MID=(0,render_util_1.mixHex)(FEVER_SKY_TOP,FEVER_SKY_BOTTOM,0.58);
-const FEVER_SKY_MIX=0.35;
+const FEVER_SKY=[
+{top:'#FF5A5F',bottom:'#FFB627',mix:0.35},
+{top:'#FF6B3D',bottom:'#FFC24A',mix:0.74},
+{top:'#FF5A5F',bottom:'#FFB627',mix:0.35},
+{top:'#FF5A5F',bottom:'#FFB627',mix:0.35},
+];
+function feverSkyDef(i){
+return FEVER_SKY[i]||FEVER_SKY[0];
+}
 const FEVER_SKY_STEPS=16;
 const FEVER_EASE_IN=0.4;
 const FEVER_SKY_FADE=0.4;
@@ -8934,6 +9241,12 @@ return null;
 }
 function createRenderer(ctx,fx,crng){
 const table=(0,render_util_1.buildPhaseTable)();
+const feverTop=(0,render_util_1.buildChannel)((p,i)=>(0,render_util_1.mixHex)(p.skyTop,feverSkyDef(i).top,feverSkyDef(i).mix));
+const feverMid=(0,render_util_1.buildChannel)((p,i)=>{
+const f=feverSkyDef(i);
+return(0,render_util_1.mixHex)((0,render_util_1.mixHex)(p.skyTop,p.skyBottom,0.58),(0,render_util_1.mixHex)(f.top,f.bottom,0.58),f.mix);
+});
+const feverBottom=(0,render_util_1.buildChannel)((p,i)=>(0,render_util_1.mixHex)(p.skyBottom,feverSkyDef(i).bottom,feverSkyDef(i).mix));
 const ef=(0,render_entities_1.makeEntFrame)();
 const bg=(0,render_world_1.makeBgFrame)();
 const tv=(0,render_toto_1.makeTotoView)();
@@ -9359,10 +9672,10 @@ g.addColorStop(0.62,table.skyMid[key]);
 g.addColorStop(1,table.skyBottom[key]);
 }
 else{
-const m=(fs/FEVER_SKY_STEPS)*FEVER_SKY_MIX;
-g.addColorStop(0,(0,render_util_1.mixHex)(table.skyTop[key],FEVER_SKY_TOP,m));
-g.addColorStop(0.62,(0,render_util_1.mixHex)(table.skyMid[key],FEVER_SKY_MID,m));
-g.addColorStop(1,(0,render_util_1.mixHex)(table.skyBottom[key],FEVER_SKY_BOTTOM,m));
+const m=fs/FEVER_SKY_STEPS;
+g.addColorStop(0,(0,render_util_1.mixHex)(table.skyTop[key],feverTop[key],m));
+g.addColorStop(0.62,(0,render_util_1.mixHex)(table.skyMid[key],feverMid[key],m));
+g.addColorStop(1,(0,render_util_1.mixHex)(table.skyBottom[key],feverBottom[key],m));
 }
 sky=g;
 skyKey=sk;
@@ -11080,9 +11393,15 @@ let wBestLbl=0;
 let wTitleBestLbl=0;
 let wStatM=0;
 let wStatX=0;
+let wGoalDone=0;
 let wMultMax=0;
 let wSub=0;
 let feverLblW=0;
+let feverBigUp=0;
+let feverBigDn=0;
+let fevTotoHi=1e9;
+let fevLastIt=99;
+let fevBannerTop=1e9;
 const feverChars=[];
 const feverCharW=[];
 for(let i=0;i<config_1.UI_TEXT.fever.length;i++){
@@ -11504,6 +11823,13 @@ ctx.font=(0,ui_paint_1.fontPx)(100,'900');
 const fw100=ctx.measureText(config_1.UI_TEXT.fever).width;
 feverBigSize=Math.min(80*K,(vw*0.86*100)/(1.3*(fw100+15)));
 F_FEVER_BIG=(0,ui_paint_1.fontPx)(feverBigSize,'900');
+ctx.font=F_FEVER_BIG;
+ctx.textBaseline='middle';
+const fm=ctx.measureText(config_1.UI_TEXT.fever);
+const asc=fm.actualBoundingBoxAscent;
+const desc=fm.actualBoundingBoxDescent;
+feverBigUp=(asc>0?asc:0.42*feverBigSize)+0.075*feverBigSize;
+feverBigDn=(desc>0?desc:0.42*feverBigSize)+0.145*feverBigSize;
 const fHalf=(fw100*feverBigSize)/200;
 feverBigGrad=ctx.createLinearGradient(-fHalf,0,fHalf,0);
 for(let i=0;i<config_1.CHAIN_HUES.length;i++)
@@ -11532,6 +11858,8 @@ computeCard();
 ctx.font=F_CARD_LINE;
 wStatM=ctx.measureText(S_M).width;
 wStatX=ctx.measureText(S_X).width;
+ctx.font=F_CARD_LABEL;
+wGoalDone=ctx.measureText(S_GOAL_DONE).width;
 computePausePanel();
 keyVersion=-1;
 syncButtons(state);
@@ -11782,7 +12110,7 @@ gapColor=ui_paint_1.COL.dim;
 }
 switch(sm.medal){
 case'none':
-medalSub='Bronze at '+(0,ui_paint_1.fmtInt)(config_1.MEDALS.bronze);
+medalSub='Bronze medal at '+(0,ui_paint_1.fmtInt)(config_1.MEDALS.bronze);
 break;
 case'bronze':
 medalSub='Silver at '+(0,ui_paint_1.fmtInt)(config_1.MEDALS.silver);
@@ -12472,8 +12800,10 @@ ctx.globalAlpha=a;
 }
 function drawFeverIntro(ctx,state){
 const it=state.fever.introT;
-if(!state.fever.active||!(it<1.25))
+if(!state.fever.active||!(it<1.25)){
+fevBannerTop=1e9;
 return;
+}
 const reduced=state.save.reducedMotion;
 if(!reduced&&it<0.08){
 ctx.globalAlpha=0.5*(1-it/0.08);
@@ -12489,11 +12819,12 @@ sc=1.3*(0,ui_paint_1.easeOutCubic)(it/0.17);
 else if(it<0.25)
 sc=1.3-(0.3*(it-0.17))/0.08;
 ctx.globalAlpha=(0,ui_paint_1.clamp01)(alpha);
+const cy=feverIntroY(state,it,sc>1?sc:1,reduced);
 if(sc>0.02){
 const S=feverBigSize;
 const txt=config_1.UI_TEXT.fever;
 ctx.save();
-ctx.translate(vw/2,vh*0.3);
+ctx.translate(vw/2,cy);
 ctx.scale(sc,sc);
 ctx.font=F_FEVER_BIG;
 ctx.textAlign='center';
@@ -12508,6 +12839,31 @@ ctx.fillText(txt,0,0);
 ctx.restore();
 }
 ctx.globalAlpha=1;
+}
+function feverIntroY(state,it,sc,reduced){
+if(it<fevLastIt)
+fevTotoHi=1e9;
+fevLastIt=it;
+const pop=!reduced&&it<0.3?1.25-(0.25*it)/0.3:1;
+const feet=heroScreenY(state);
+const top=feet-80*pop;
+const bot=feet+22*pop;
+if(top<fevTotoHi)
+fevTotoHi=top;
+const up=feverBigUp*sc;
+const dn=feverBigDn*sc;
+const gap=6*K;
+let y=vh*0.22;
+if(fevTotoHi-gap-dn<y){
+y=fevTotoHi-gap-dn;
+const minY=sT+4*K+up;
+if(y<minY)
+y=minY;
+}
+if(top-gap-dn<y&&bot+gap>y-up)
+y=top-gap-dn;
+fevBannerTop=y-up;
+return y;
 }
 function heroScreenY(state){
 const h=state.hero;
@@ -12789,6 +13145,14 @@ dy=-(0,ui_paint_1.easeInCubic)(q)*60*K;
 alpha=1-q;
 sc=1-q*0.15;
 }
+}
+const fit=state.fever.introT;
+if(state.fever.active&&fit<1.25){
+const fTop=Math.min(vh*0.22-feverBigUp*1.3,fevBannerTop);
+if(bannerY+36*K>fTop)
+alpha*=fit<0.1?1-fit/0.1:fit>1?(fit-1)/0.25:0;
+if(alpha<=0)
+return;
 }
 const w=bannerW+52*K;
 const h=42*K;
@@ -13200,6 +13564,7 @@ ctx.lineTo((W-pad)*u,y*u);
 ctx.lineWidth=1.5*u;
 ctx.strokeStyle='rgba(165,180,252,0.2)';
 ctx.stroke();
+const hasMedal=sm.medal!=='none';
 const revealT=t-COUNT_START-config_1.UI.countUp-0.05;
 const mA=reduced?(0,ui_paint_1.clamp01)(revealT/0.3):1;
 let mS=1;
@@ -13207,7 +13572,7 @@ if(!reduced)
 mS=revealT<=0?0:(0,ui_paint_1.easeOutElastic)(revealT/0.45);
 const medalCx=(pad+28)*u;
 const medalCy=(y+30)*u;
-if(mS>0&&mA>0){
+if(hasMedal&&mS>0&&mA>0){
 ctx.save();
 ctx.globalAlpha=alpha*mA;
 ctx.translate(medalCx,medalCy);
@@ -13217,7 +13582,7 @@ const shine=reduced?0:((now*0.45)%1.6)/1.0;
 ctx.restore();
 }
 const nameA=(0,ui_paint_1.clamp01)(revealT/0.25);
-if(nameA>0){
+if(hasMedal&&nameA>0){
 ctx.globalAlpha=alpha*nameA;
 const nameDx=reduced?0:(1-(0,ui_paint_1.easeOutCubic)(revealT/0.3))*-10*u;
 ctx.textAlign='left';
@@ -13234,7 +13599,31 @@ ctx.globalAlpha=alpha;
 ctx.textAlign='left';
 ctx.textBaseline='middle';
 const gx0=(W/2+18)*u;
+if(!hasMedal){
+const gcx=pw/2;
+ctx.font=F_CARD_LABEL;
 if(sm.goalDone){
+const gl=gcx-(24*u+wGoalDone)/2;
+(0,ui_paint_1.iconCheck)(ctx,gl+9*u,(y+19)*u,9*u,ui_paint_1.COL.green);
+ctx.fillStyle=ui_paint_1.COL.green;
+ctx.fillText(S_GOAL_DONE,gl+24*u,(y+19.5)*u);
+}
+ctx.textAlign='center';
+if(!sm.goalDone){
+ctx.fillStyle=ui_paint_1.COL.gold;
+ctx.fillText(S_NEXT_GOAL,gcx,(y+19.5)*u);
+}
+ctx.font=F_GOAL;
+ctx.fillStyle=ui_paint_1.COL.text;
+ctx.fillText(goalLine0,gcx,(y+39)*u);
+ctx.font=F_MEDAL_SUB;
+ctx.fillStyle=sm.goalDone?ui_paint_1.COL.dim:ui_paint_1.COL.dimmer;
+if(!sm.goalDone)
+ctx.globalAlpha=alpha*nameA;
+ctx.fillText(sm.goalDone?goalLine1:medalSub,gcx,(y+58)*u);
+ctx.globalAlpha=alpha;
+}
+else if(sm.goalDone){
 (0,ui_paint_1.iconCheck)(ctx,gx0+9*u,(y+16)*u,9*u,ui_paint_1.COL.green);
 ctx.font=F_CARD_LABEL;
 ctx.fillStyle=ui_paint_1.COL.green;
@@ -14319,6 +14708,7 @@ tm,
 quiet:false,
 genEnabled:true,
 cuttable:false,
+cutAt:config_1.PHYS.jumpMinHold,
 pressed:false,
 jumped:false,
 boingLaunch:false,
@@ -14329,6 +14719,8 @@ died:false,
 deathVX:0,
 deathLanded:false,
 deathSink:false,
+deathFalling:false,
+hopLandT:config_1.NEVER,
 nearSlowT:0,
 freezeLevel:0,
 freezeReal:0,
@@ -14382,6 +14774,7 @@ return sim;
 }
 function resetSimCtx(sim){
 sim.cuttable=false;
+sim.cutAt=config_1.PHYS.jumpMinHold;
 sim.pressed=false;
 sim.jumped=false;
 sim.boingLaunch=false;
@@ -14392,6 +14785,8 @@ sim.died=false;
 sim.deathVX=0;
 sim.deathLanded=false;
 sim.deathSink=false;
+sim.deathFalling=false;
+sim.hopLandT=config_1.NEVER;
 sim.nearSlowT=0;
 sim.freezeLevel=0;
 sim.freezeReal=0;
@@ -14721,6 +15116,7 @@ const h=state.hero;
 if(h.action==='dead')
 return;
 state.deathCause=cause;
+sim.deathFalling=(!h.grounded&&h.action==='air'&&h.vy>0)||(h.grounded&&sim.hopLandT<=config_1.TUTORIAL.landedShortS);
 h.action='dead';
 h.grounded=false;
 h.deathT=0;
@@ -15498,36 +15894,64 @@ if(bubble&&!danger){
 (0,hero_1.heroRelease)(state,sim);
 }
 }
-function laneBlocked(state,a,b){
+function laneBlocker(state,a,b){
 const ents=state.entities;
+let r=-1;
 for(let i=0;i<ents.length;i++){
 const e=ents[i];
 if(!e.active||e.x>=b||e.x+e.w<=a)
 continue;
-if(e.hazard||e.kind==='pit'||e.kind==='drum'||e.kind==='kiteDrum'||e.kind==='melon')
-return true;
-if(e.kind==='pickupShield'||e.kind==='pickupMagnet')
-return true;
+const k=e.kind;
+if(e.hazard||k==='pit'||k==='drum'||k==='kiteDrum'||k==='melon'||k==='pickupShield'||k==='pickupMagnet'){
+if(e.x+e.w>r)
+r=e.x+e.w;
 }
-return false;
 }
-function spawnFeverLane(state,sv,_sim){
+return r;
+}
+function laneSlot(state,x,xMax,pad){
+for(let guard=0;guard<96&&x<=xMax;guard++){
+const r=laneBlocker(state,x-pad,x+config_1.BUSH.w+pad);
+if(r<0)
+return x;
+x=r+pad;
+}
+return-1;
+}
+function planLane(state,x0,xMax,step,pad,out,max){
+let n=0;
+let x=laneSlot(state,x0,xMax,pad);
+while(x>=0&&n<max){
+out[n++]=x;
+x=laneSlot(state,x+step,xMax,pad);
+}
+return n;
+}
+function spawnFeverLane(state,sv,sim){
 const h=state.hero;
 const v=state.run.speed;
-const x0=Math.max(state.cam.x+state.view.viewW+60,h.x+v*0.9);
-const end=h.x+v*4.8;
+const x0=h.x+config_1.FEVER.laneStartU;
+let xMax=h.x+v*(config_1.FEVER.duration-config_1.FEVER.laneEndS);
+const horizon=h.x+config_1.GEN.aheadU-config_1.BUSH.w-config_1.FEVER.laneClearU;
+if(xMax>horizon)
+xMax=horizon;
+const out=sim.arcX;
+const max=Math.min(config_1.FEVER.laneMax,out.length);
+const step=config_1.FEVER.laneStepS*v;
+const minStep=config_1.FEVER.laneMinStepS*v;
+let n=planLane(state,x0,xMax,step,config_1.FEVER.laneClearU,out,max);
+if(n<config_1.FEVER.laneMin)
+n=planLane(state,x0,xMax,minStep,config_1.FEVER.laneClearU,out,max);
+if(n<config_1.FEVER.laneMin)
+n=planLane(state,x0,xMax,minStep,0,out,max);
 let prev=-1;
-for(let k=0;k<10;k++){
-const x=x0+k*0.45*v;
-if(x>end)
+for(let k=0;k<n;k++){
+const x=out[k];
+const e=(0,world_sim_1.spawnEntity)(state,sv,'bush',x);
+if(e===null)
 break;
-const e=laneBlocked(state,x-0.2*v,x+0.2*v)?null:(0,world_sim_1.spawnEntity)(state,sv,'bush',x);
-if(e===null){
-prev=-1;
-continue;
-}
 e.lane=true;
-if(prev>=0){
+if(prev>=0&&x-prev<=step*1.25&&laneBlocker(state,prev+config_1.BUSH.w,x)<0){
 const gap=x-(prev+config_1.BUSH.w);
 for(let j=1;j<=3;j++){
 const m=(0,world_sim_1.spawnEntity)(state,sv,'mango',prev+config_1.BUSH.w+(gap*j)/4-config_1.MANGO.size/2);

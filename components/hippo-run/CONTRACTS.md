@@ -1,6 +1,6 @@
 # Hippo Tototo — module contracts
 
-The spec (`docs/GAME_DESIGN.md`) is the source of truth for **what** the game does. This file is the source of truth for **how the modules fit together** during the parallel phase. If the two disagree on a cross-module detail, this file wins; flag it in your report.
+**Status: shipped.** Values quoted here reflect the shipped tuning in `config.ts` (which wins on any number). The spec (`docs/GAME_DESIGN.md`) is the source of truth for **what** the game does. This file is the source of truth for **how the modules fit together** (written for the parallel build phase; the ownership table and rules still apply to later changes). If the two disagree on a cross-module detail, this file wins; flag it in your report.
 
 ---
 
@@ -112,7 +112,7 @@ frame(rafTime)                          real dt = clamp(Δ, 0, 0.1 s)
   5  adaptive quality (2 s avg frame > 20 ms -> clock.lowQuality, DPR 1.5, fx.setLowQuality(true))
 ```
 
-Hit-stop and `timeScale` (near-miss 0.6×, death 0.25×, teaching freeze 0.15×) affect only the sim. fx/shake/popups/UI run on real dt.
+Hit-stop and `timeScale` (near-miss 0.6×, death 0.25×, first-run lesson slow-mo 0.25×, teaching freeze 0.02×; none in reduced motion) affect only the sim. fx/shake/popups/UI run on real dt.
 
 ---
 
@@ -179,7 +179,7 @@ Note frequencies: `NOTE_ROOT_HZ * 2^(ladderSemitone(ladderIndex(chain)) / 12)` (
 ### 6.5 UI (`ui.ts`, UI engineer)
 `createUI({ standalone }): UiApi` — `layout(view)`, `update(state, realDt)`, `draw(ctx, state)`, `hitTest(state, lx, ly)`, `buttons`.
 - Canvas buttons (`ButtonId`): `pause`, `sound`, `motion`, `resume`, `restart`, `copy`. Visibility per mode in the `ui.ts` header; `hitTest` recomputes it from `state` (may be called between frames). Pressing a button never produces ACTION (input checks `hitTest` first). The shell maps: `pause` -> pause, `sound` -> toggle mute (+save), `motion` -> toggle reduced motion (+save), `resume` -> 3-2-1, `restart` -> new run, `copy` -> clipboard + toast. Tap anywhere else on title/gameover = start/retry (handled by the shell via `actionDown`).
-- Screens & data sources: title (logo "HIPPO TOTOTO" letters bouncing on `music.beatPhase`/`clock.now`, subtitle, how-to, "Tap or press Space", `save.best` + `medalFor(save.best)`), HUD (`run.score`, `run.distance` "412 m", `save.best`, groove bar `run.groove/100` -> countdown `fever.t / FEVER.duration` during fever, pulse on `music.beatPhase`, flash > 85; chain "x3" beside Toto in `CHAIN_HUES[hueIndex(chain)]` while `run.chain > 0`; Mud Coat icon `hero.shield`; magnet ring `hero.magnetT / POWERUP.magnetDur`), tutorial prompt (`tutorial.prompt`, anchored at world `promptX/promptY`, text by `lastDevice`: "TAP"/"SPACE"), phase banner (`banner`), toast, pause menu + 3-2-1 (`pause.countdown`, step = `UI.countdownStep`), game-over card (`summary.*`, appears when `mode === 'gameover'`, count-up over `UI.countUp` from `modeT`, "Tap / Space to retry" enabled once `modeT >= DEATH.inputLockout`), portrait hint (UI-private one-time 3 s timer when `view.portrait`).
+- Screens & data sources: title (logo "HIPPO TOTOTO" letters bouncing on `music.beatPhase`/`clock.now`, subtitle, how-to, "Tap or press Space", `save.best` + `medalFor(save.best)`), HUD (`run.score`, `run.distance` "412 m", `save.best`, groove bar `run.groove/100` -> countdown `fever.t / FEVER.duration` during fever, pulse on `music.beatPhase`, flash > 85; chain "x3" beside Toto in `CHAIN_HUES[hueIndex(chain)]` while `run.chain > 0`; Mud Coat icon `hero.shield`; magnet ring `hero.magnetT / POWERUP.magnetDur`), tutorial prompt (`tutorial.prompt`: `tap` / `drum` / `slam` / `boing` / `hold`, anchored at world `promptX/promptY` (slam/boing follow Toto), text by `lastDevice`: touch vs keyboard variants in `UI_TEXT.tut*`), TOTOTO TIME entry banner (`fever.introT`, 1.25 s, 22% of the view height, kept above Toto), phase banner (`banner`), toast, pause menu + 3-2-1 (`pause.countdown`, step = `UI.countdownStep`), game-over card (`summary.*`, appears when `mode === 'gameover'` = `DEATH.cardAt` 0.65 s after the hit, count-up over `UI.countUp` from `modeT`, "Tap / Space to retry" enabled once `modeT >= DEATH.inputLockout` 0.35 s), portrait hint (UI-private one-time 3 s timer when `view.portrait`).
 - Next build (`!state.standalone`): keep a `UI.domLinkClearW × domLinkClearH` CSS-px box top-left clear on title/paused/gameover (DOM "Back to site" link) and the bottom ~28 CSS px clear on title (DOM footer).
 - Reduced motion: UI transitions become fades, no flashing.
 
@@ -189,7 +189,7 @@ Note frequencies: `NOTE_ROOT_HZ * 2^(ladderSemitone(ladderIndex(chain)) / 12)` (
 - Auto-pause on `visibilitychange` (hidden), `window.blur`, real resize while playing. Never auto-resumes; resume = 3-2-1 (`pause.countdown`), `__hippoRun.resume()` skips it.
 - Settings live in `state.save` (`muted`, `reducedMotion`); every change -> `writeSave(state.save)`. Save also at run end.
 - Haptics (`navigator.vibrate`, try/catch, off in reduced motion): slam 12 ms, death 30 ms — gameplay.
-- **Determinism** (same seed + same inputs => same run, also under `advance()`): sim code (steps 1–7) never reads `performance.now()`, `Date.now()`, `clock.now`, `InputEvent.time`, `Math.random()` or view metrics. Hold duration = sim time (`hero.holdT`; a release before `PHYS.jumpMinHold` sets `cutPending`). Generation runs to the fixed horizon `hero.x + GEN.aheadU`, never `viewW`-based. View metrics may only affect cosmetics/warning timing (log "!" bubble at the right edge, recycling behind the camera). Suggested: sample a chunk's speed as `speedAt(arrivalTime)` (estimate from the cursor distance) rather than the speed at spawn time.
+- **Determinism** (same seed + same inputs => same run, also under `advance()`): sim code (steps 1–7) never reads `performance.now()`, `Date.now()`, `clock.now`, `InputEvent.time`, `Math.random()` or view metrics. Hold duration = sim time (`hero.holdT`; a release before `sim.cutAt` (`PHYS.jumpMinHold`, or longer up to `PHYS.tapAssistMax` when the plain tap hop would come down on the next thorn bush; chosen at press time from sim state only) sets `cutPending`). Generation runs to the fixed horizon `hero.x + GEN.aheadU`, never `viewW`-based. View metrics may only affect cosmetics/warning timing (log "!" bubble at the right edge, recycling behind the camera). Suggested: sample a chunk's speed as `speedAt(arrivalTime)` (estimate from the cursor distance) rather than the speed at spawn time.
 - Debug API (`window.__hippoRun`, spec §14.6): implemented in `game.ts`. `getState().heroY` = height of the feet **above** the ground (u, + up); `heroVy` = raw `hero.vy` (+ down). `advance(s)` runs `round(s / DT)` ticks with audio suppressed and no rendering.
 
 ---
@@ -200,32 +200,33 @@ Gameplay performs the state change, then calls fx/audio **in the same step**. Hi
 
 | Event | State (gameplay) | fx | audio | hit-stop / shake |
 |---|---|---|---|---|
-| Jump | `vy=-900`, squash 0.82/1.22, expr `o`, `whip` | `burst('dust')` | `jump` | — |
+| Jump | `vy=-900` (release cuts to -420 after `sim.cutAt`: 0.06 s, bush-aware up to 0.135 s), squash 0.82/1.22, expr `o`, `whip` | `burst('dust')` | `jump` | — |
 | Slam start | hang 0.05 s, pose `slamHang`, expr `squint`, `cheekPuff=1` | — | `slamStart` | — |
 | Slam hits ground | squash 1.5/0.55, chain bank/reset, melons within 120 u burst, `postSlamT=0` | `ring('shock')`, `burst('pebble',12)` | `slamImpact` (+ haptic 12) | 0.06 / 0.35 |
-| Boing | `vy=-1120`, squash 0.72/1.34, expr `joy`, +30×mult, groove +4 | `ring('boing')`, `popup` | `boing` | — |
-| Drum bounce | `vy=-900`, chain+1, `drumPoints`, groove +7, `e.hitT=0`, `e.hue` | `ring('drum',hue)`, `burst('note',hue)`, `popup` | `drum(chain)` | — |
+| Boing | `vy=-1120`, squash 0.72/1.34, expr `joy`, +30×mult, groove 0 (`GROOVE.boing`) | `ring('boing')`, `popup` | `boing` | — |
+| Drum bounce | `vy=-900`, chain+1, `drumPoints`, groove +5, `e.hitT=0`, `e.hue` | `ring('drum',hue)`, `burst('note',hue)`, `popup` | `drum(chain)` | — |
 | BOOM bounce | `vy=-1100`, chain+2, groove +10 | `ring('drum')`+`ring('shock')`, `popup('BOOM!')` | `drumBoom(chain)` | 0.05 / 0.3 |
 | Stomp hornbill/log | bounce, chain+1, +100/+75 ×mult, groove +8, `flag='stomped'` | `burst('feather'|'chip')`, `popup` | `stomp(chain)` | 0.04 / 0.2 |
 | Land on ground | chain >= 2 -> bank `chainBankValue`, chain=0, squash `1+min(0.4,vy/2600)` | `burst('dust')`, bank `popup(lg)` | `land(vy)`, `chainBank(chain)` | — |
-| Mango / golden | +10/+100 ×mult, groove +1.2/+15, streak | `burst('spark')` | `mango(streak)` / `golden` | — |
+| Mango / golden | +10/+100 ×mult, groove +0.4/+15, streak | `burst('spark')` | `mango(streak)` / `golden` | — |
 | Melon run / slam | `flag='split'` +20 / `flag='burst'` +60 + 5 mangoes | `burst('seed'+'juice')` | `melon` | — |
-| Near miss | +25×mult, groove +5, `sweatT`, `flashT`, timeScale 0.6 for 80 ms | `popup('CLOSE!')`, `flash(white)` | `nearMiss` | — |
-| Fever start | `fever.active`, t=6, expr `star` | `flash(warm)`, `popup('TOTOTO TIME!')` | `feverStart` | — |
-| Fever smash | hazard `flag='smashed'`, +50 | `burst('poof')` | `smash` | 0.03 / 0.15 |
-| Fever end | groove 0, invuln 1 s, poof hazards within 500 u, next chunk breather | `burst('poof')` each | `feverEnd` | — |
+| Hazard cleared | lethal hazard passed unhit / pit cleared by landing beyond it: groove +2 (not in fever) | — | — | — |
+| Near miss | +25×mult, groove +8, `sweatT`, `flashT`, timeScale 0.6 for 80 ms | `popup('CLOSE!')`, `flash(white)` | `nearMiss` | — |
+| Fever start | `fever.active`, t=6, `introT=0` (UI banner), expr `star`, smash lane (`spawnFeverLane`: 4–10 bushes from 1080 u ahead) | `flash(warm)`, `burst('star')` | `feverStart` | 0.18 / 0.5 |
+| Fever smash | hazard `flag='smashed'`, +50 | `burst('poof')` | `smash` | 0.04 / 0.15 |
+| Fever end | groove 0, invuln 1 s, poof hazards within 500 u + leftover lane, next chunk breather (exactly one per fever) | `burst('poof')` each | `feverEnd` | — |
 | Shield get / break | `hero.shield` / hazard removed, invuln 1 s, chain kept | `burst('mud')` | `shieldGet` / `shieldBreak` | 0.08 / 0.5 |
 | Pit splorch rescue | `vy=-900`, chain ends, pit `flag='rescued'` | `burst('mud')` | `splorch` | — |
 | Best flag passed | +250, `run.bestPassed`, flag `passed` | `burst('confetti')`, `popup('+NEW RECORD')` | `bestFlag` | — |
 | Log warning | `e.warnT = 0.6` | (render draws "!" bubble) | `logWarn` | — |
 | Phase entered | `banner = "NOON · 250 m"`, `run.phasesSeen` bit | — | — | — |
-| Death | `deathCause`, pose `tumble`->`sit`/`sink`, expr `dizzy`/`sleep`, timeScale 0.25 for 0.5 s, `mode='dying'`, card at 0.9 s -> `gameover` + `summary` + save | `burst` per cause | `death` (+ haptic 30) | 0.12 / 0.7 |
+| Death | `deathCause`, pose `tumble`->`sit`/`sink`, expr `dizzy`/`sleep`, timeScale 0.25 for 0.5 s, `mode='dying'`, card at 0.65 s (`DEATH.cardAt`) -> `gameover` + `summary` + save | `burst` per cause | `death` (+ haptic 30) | 0.12 / 0.7 |
 
 ---
 
 ## 8. Reduced motion (`state.save.reducedMotion`)
 - fx: `shake()`/`flash()` ignored, speed lines off (ART).
-- gameplay: no slow-mo (near miss / death / teaching freeze), hit-stop capped at 0.04 s, no haptics.
+- gameplay: no slow-mo (near miss / death / lesson slow-mo / teaching freeze), hit-stop capped at 0.04 s, no haptics. The first-run assisted jump (any tap clears the lesson bush) still applies.
 - render: invulnerability = steady 50% alpha (no blink), fever-end warning without blinking.
 - ui: transitions become fades; groove meter does not flash.
 
@@ -241,8 +242,8 @@ Gameplay performs the state change, then calls fx/audio **in the same step**. Hi
   await p.evaluate(() => { const h = window.__hippoRun; h.start(); h.advance(4.9); return h.getState(); });
   ```
 - Integration/test extras on `window.__hippoRun` (additive, see `types.ts` `DebugState`/`DebugApi`): `getState()` also returns `heroX, timeScale, hitStop, trauma, feverT, phase, phasesSeen, bestPassed, tutorial, freeze, presses, muted, reducedMotion, best, bestDist, viewW, viewH, heroScreenX, scale`; plus `getEntities()`, `getButtons()` (CSS px) and `setGroove(v)`.
-- Acceptance / playtest: `pnpm build && node scripts/playtest.mjs [--shots DIR] [--url URL] [--no-next] [--only groups]` drives both `/play.html` and `/play` with Playwright (spec §15).
-- Standalone: `node scripts/build-standalone.mjs` (also runs as `prebuild`; `.npmrc` enables pre/post scripts for pnpm 10). The build fails on external URLs or > 400 KB.
+- Acceptance / playtest: `pnpm build && node scripts/playtest.mjs [--shots DIR] [--url URL] [--no-next] [--only groups] [--file path/play.html]` drives both `/play.html` and `/play` with Playwright (spec §15; ~200 checks, JSON report next to the shots). The heap check soaks every phase and content type first, then requires the second of two 20 s real-time windows to show no sustained retained growth (see `testHeap`).
+- Standalone: `node scripts/build-standalone.mjs [--out path]` (also runs as `prebuild`; `.npmrc` enables pre/post scripts for pnpm 10; `--out` writes a scratch bundle instead of `public/play.html`). The build fails on external URLs or > 400 KB.
 - Type-check: `npx tsc --noEmit -p tsconfig.json`; full: `pnpm build`.
 
 ---

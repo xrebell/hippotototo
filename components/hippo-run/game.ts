@@ -750,6 +750,8 @@ export function createGame(canvas: HTMLCanvasElement, opts?: GameOptions): GameH
     const caps = DEATH_CAPTIONS[state.deathCause !== null ? state.deathCause : 'bush'];
     sm.caption = caps[crng.int(0, caps.length - 1)];
     if (state.deathCause === 'mound' && s.runs < TUTORIAL.holdCaptionRuns) sm.caption = UI_TEXT.holdCaption;
+    // Came down on a bush from a hop (pressed too early) on the first runs: say how to fix it.
+    if (state.deathCause === 'bush' && sim.deathFalling && s.runs < TUTORIAL.holdCaptionRuns) sm.caption = UI_TEXT.bushEarlyCaption;
     if (!r.goalDone && goalMet(sim.goalAtStart)) r.goalDone = true; // met on the fatal step
     sm.goalDone = r.goalDone;
     sm.goalDoneText = r.goalDone ? goalLabel(sim.goalAtStart) : '';

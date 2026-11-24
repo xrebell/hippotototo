@@ -1849,10 +1849,45 @@ async function testFps(url, seconds) {
 }
 
 /*
- * Heap: retained growth after a forced GC across 20 s of play must stay small (no leak / no
- * retained per-frame garbage). Young-generation churn is reported: it is V8 HeapNumber boxing of
- * fractional arguments passed to canvas 2D calls (no objects, arrays, closures or strings).
+ * Heap: no LEAK = no retained growth that keeps going once the code is warm.
+ *
+ * Why not "growth over the first 20 s": JSHeapUsedSize includes V8's JIT output. Diffing heap
+ * snapshots (after forced GC) across 20 s windows shows the growth during play is 'code' nodes
+ * (InstructionStream, deopt data, HeapNumber constants embedded in newly optimised code) plus a few
+ * KB of strings; no game objects, arrays, closures or entities are retained. It comes from content
+ * first seen in the window and from render/UI/audio paths tiering up, and it decays: after the old
+ * 3 s warm-up, consecutive 20 s windows measured 542, 175, 106, 158 KB (~1 MB in 80 s, still
+ * tiering), so a 512 KB limit on the first window failed with or without changes (~520-595 KB).
+ *
+ * Protocol:
+ *  1. Soak (~24 s): HEAP_SOAK_STEPS x (advance(1) + HEAP_SOAK_FRAMES rendered frames), autopilot +
+ *     invincible, TOTOTO TIME forced every 25 sim s: ~2.8 km, all four day phases (looped, asserted),
+ *     all 12 entity kinds, ~9 fevers, ~1400 rendered frames. Sim, render and UI code have seen
+ *     everything they will see in the windows (coverage is in the evidence).
+ *  2. Window 1: 20 s of real-time play between two retained() reads. Reported, not judged: the
+ *     residual tier-up of real-time-only paths (audio synthesis, per-event code).
+ *  3. Window 2: the next 20 s. Judged. A leak is SUSTAINED growth: it adds the same amount to
+ *     every window, while JIT warm-up has decayed toward its floor by window 2.
+ * Measured (standalone, headless Chromium, Nov 2026; 5 runs): window 1 = 90-129 KB, window 2 =
+ * 58-105 KB, a third window 7-63 KB. With an injected leak (retained arrays from a rAF loop; 4-byte
+ * tagged slots under pointer compression) of ~52 B/frame window 2 read 153-167 KB, ~84 B/frame
+ * 182-200 KB. Without the soak, windows after a 3 s warm-up read 542, 175, 106, 158 KB.
+ * HEAP_LEAK_KB = 192 on window 2 is ~1.8x the worst no-leak reading (headroom for machine and
+ * Next-vs-standalone differences), and a sustained leak of >= ~110 B per frame (~6.7 KB/s at 60 fps,
+ * e.g. two small objects or a short string kept per frame) exceeds it on top of the lowest floor.
+ * Next (/play): retained() readings are bimodal: now and then one of the 5 samples lands ~110-130 KB
+ * below the rest (time series every 5 s for 60 s after the soak, 3 runs). When the MID reading
+ * catches such a dip and base/after do not, window 1 reads negative and window 2 inflated by the
+ * same amount (integration runs: w1/w2 = -107/176, -116/157, 7/-29, -46/79 KB; w1 + w2 = 69, 41,
+ * -22, 33 KB). Window 1 cannot be negative from warm-up or a leak (both only add), so the judged
+ * value is min(w2, w1 + w2): with w1 >= 0 (every standalone run, any real leak) it is exactly w2.
+ * Young-generation churn is reported over window 2: it is V8 HeapNumber boxing of fractional
+ * arguments passed to canvas 2D calls (no objects, arrays, closures or strings).
  */
+const HEAP_SOAK_STEPS = 240;
+const HEAP_SOAK_FRAMES = 6;
+const HEAP_WINDOW_MS = 20000;
+const HEAP_LEAK_KB = 192;
 async function testHeap(url) {
   const { ctx, page } = await openPage(url + (url.includes('?') ? '&' : '?') + 'seed=8');
   await page.keyboard.press('Space');
@@ -1865,23 +1900,76 @@ async function testHeap(url) {
   await cdp.send('Performance.enable');
   await cdp.send('HeapProfiler.enable');
   const used = async () => (await cdp.send('Performance.getMetrics')).metrics.find((x) => x.name === 'JSHeapUsedSize').value;
-  await page.waitForTimeout(3000); // warm-up (JIT tiers)
-  await cdp.send('HeapProfiler.collectGarbage');
-  const base = await used();
-  let churn = 0;
-  let prev = base;
-  const t0 = Date.now();
-  while (Date.now() - t0 < 20000) {
-    await page.waitForTimeout(100);
-    const u = await used();
-    if (u > prev) churn += u - prev;
-    prev = u;
-  }
-  await cdp.send('HeapProfiler.collectGarbage');
-  const after = await used();
-  const growthKB = (after - base) / 1024;
-  check('heap: no retained growth over 20 s of play (after forced GC)', growthKB < 512, `retained ${growthKB.toFixed(0)} KB (base ${(base / 1048576).toFixed(1)} MB)`);
-  info('heap: young-generation churn (HeapNumber boxing of canvas-call args; scavenged)', `~${(churn / 1024 / 20).toFixed(0)} KB/s`);
+  /**
+   * Retained heap = min over 5 x (forced GC, read). The game keeps allocating (~1.4 MB/s of
+   * scavenged churn) between the GC and the read: single back-to-back samples spread by ~200 KB,
+   * the minimum is the closest to what survived.
+   */
+  const retained = async () => {
+    let m = Infinity;
+    for (let k = 0; k < 5; k++) {
+      await cdp.send('HeapProfiler.collectGarbage');
+      const u = await used();
+      if (u < m) m = u;
+    }
+    return m;
+  };
+  const soak = await page.evaluate(
+    ([steps, frames]) =>
+      new Promise((res) => {
+        const H = window.__hippoRun;
+        const kinds = {};
+        let fevers = 0;
+        let i = 0;
+        const step = () => {
+          if (i % 25 === 5) H.setGroove(100);
+          H.advance(1);
+          const s = H.getState();
+          if (s.fever) fevers++;
+          const es = H.getEntities();
+          for (let k = 0; k < es.length; k++) kinds[es[k].kind] = 1;
+          if (++i >= steps) {
+            res({ dist: Math.round(s.distance), state: s.state, phasesSeen: s.phasesSeen, feverSteps: fevers, kinds: Object.keys(kinds).length });
+            return;
+          }
+          let f = frames;
+          const frame = () => (--f > 0 ? requestAnimationFrame(frame) : step());
+          requestAnimationFrame(frame);
+        };
+        step();
+      }),
+    [HEAP_SOAK_STEPS, HEAP_SOAK_FRAMES],
+  );
+  /** Play HEAP_WINDOW_MS of real time; returns young-generation churn (bytes allocated then scavenged). */
+  const playWindow = async (from) => {
+    let churn = 0;
+    let prev = from;
+    const t0 = Date.now();
+    while (Date.now() - t0 < HEAP_WINDOW_MS) {
+      await page.waitForTimeout(100);
+      const u = await used();
+      if (u > prev) churn += u - prev;
+      prev = u;
+    }
+    return churn;
+  };
+  const base = await retained();
+  await playWindow(base);
+  const mid = await retained();
+  const churn = await playWindow(mid);
+  const after = await retained();
+  const s = await page.evaluate(() => window.__hippoRun.getState());
+  const w1 = (mid - base) / 1024;
+  const w2 = (after - mid) / 1024;
+  // a negative window 1 can only be a dip in the mid reading (see above): judge the 40 s total then
+  const judged = Math.min(w2, w1 + w2);
+  const cover = `soak ${soak.dist} m, phases 0x${soak.phasesSeen.toString(16)}, ${soak.kinds} entity kinds, ${soak.feverSteps} fever s`;
+  check(
+    'heap: no sustained retained growth (2nd 20 s window after soak + forced GC)',
+    judged < HEAP_LEAK_KB && s.state === 'playing' && soak.state === 'playing' && soak.phasesSeen === 15,
+    `window 1 ${w1.toFixed(0)} KB (JIT warm-up, reported), window 2 ${w2.toFixed(0)} KB, judged ${judged.toFixed(0)} KB (limit ${HEAP_LEAK_KB}); base ${(base / 1048576).toFixed(1)} MB; ${cover}; ${s.state} at ${Math.round(s.distance)} m`,
+  );
+  info('heap: young-generation churn (HeapNumber boxing of canvas-call args; scavenged)', `~${(churn / 1024 / (HEAP_WINDOW_MS / 1000)).toFixed(0)} KB/s`);
   await ctx.close();
 }
 

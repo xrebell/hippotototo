@@ -12,14 +12,15 @@
  * stompables additionally accept "feet above the target's vertical centre with vy > 0" on contact.
  *
  * Determinism: only sim data is read (no clocks, no Math.random). View-dependent bits: the log edge
- * warning, the recycling line, and where the TOTOTO TIME smash lane starts (just past the right
- * screen edge, so nothing pops in on screen). None of them changes the course or survival; the lane
- * can change the fever's smash/mango score on different screen widths.
+ * warning and the recycling line; neither changes the course, survival or score. The TOTOTO TIME
+ * smash lane starts at a fixed distance past the right edge of the WIDEST view (FEVER.laneStartU),
+ * so it never pops in on screen and is identical on every screen size.
  */
 import {
   BUSH,
   CHAIN_HUES,
   DT,
+  FEVER,
   FX,
   GEN,
   GOLDEN,
@@ -777,39 +778,77 @@ export function autopilotStep(state: GameState, sv: Services, sim: SimCtx): void
 /* TOTOTO TIME smash lane                                              */
 /* ------------------------------------------------------------------ */
 
-/** True when an active pit, drum, hazard, melon or bubble overlaps [a, b]. */
-function laneBlocked(state: GameState, a: number, b: number): boolean {
+/**
+ * Lane blocker overlapping [a, b]: the largest right edge among active pits, drums, hazards, melons
+ * and bubbles that overlap it, or -1 when [a, b] is free.
+ */
+function laneBlocker(state: GameState, a: number, b: number): number {
   const ents = state.entities;
+  let r = -1;
   for (let i = 0; i < ents.length; i++) {
     const e = ents[i];
     if (!e.active || e.x >= b || e.x + e.w <= a) continue;
-    if (e.hazard || e.kind === 'pit' || e.kind === 'drum' || e.kind === 'kiteDrum' || e.kind === 'melon') return true;
-    if (e.kind === 'pickupShield' || e.kind === 'pickupMagnet') return true;
+    const k = e.kind;
+    if (e.hazard || k === 'pit' || k === 'drum' || k === 'kiteDrum' || k === 'melon' || k === 'pickupShield' || k === 'pickupMagnet') {
+      if (e.x + e.w > r) r = e.x + e.w;
+    }
   }
-  return false;
+  return r;
 }
 
 /**
- * Fever start: a lane of thorn bushes to smash (every 0.45 s of travel from just beyond the right
- * screen edge, or 0.9 s ahead, up to 4.8 s ahead), with 3 mangoes between consecutive bushes. Slots
- * near existing course content are skipped; nothing spawns inside the visible view.
+ * First lane-bush x >= x (bush [x, x + BUSH.w] keeping `pad` u from every course object), sliding
+ * past blockers; -1 when none fits at or before xMax.
  */
-export function spawnFeverLane(state: GameState, sv: Services, _sim: SimCtx): void {
+function laneSlot(state: GameState, x: number, xMax: number, pad: number): number {
+  for (let guard = 0; guard < 96 && x <= xMax; guard++) {
+    const r = laneBlocker(state, x - pad, x + BUSH.w + pad);
+    if (r < 0) return x;
+    x = r + pad;
+  }
+  return -1;
+}
+
+/** Dry run: lane-bush positions into out[] at spacing `step`, at most `max`. Returns the count. */
+function planLane(state: GameState, x0: number, xMax: number, step: number, pad: number, out: number[], max: number): number {
+  let n = 0;
+  let x = laneSlot(state, x0, xMax, pad);
+  while (x >= 0 && n < max) {
+    out[n++] = x;
+    x = laneSlot(state, x + step, xMax, pad);
+  }
+  return n;
+}
+
+/**
+ * Fever start: a lane of thorn bushes to smash, from FEVER.laneStartU ahead of the hero (past the
+ * right edge of the widest view: never on screen, never viewW-dependent) to where Toto still reaches
+ * it FEVER.laneEndS before the fever ends (and inside the generated horizon, so later chunks never
+ * overlap it). Bushes go every FEVER.laneStepS of travel, sliding past course objects; if fewer than
+ * FEVER.laneMin fit, the spacing tightens to laneMinStepS, then the clearance drops to 0, so every
+ * TOTOTO TIME has >= laneMin lane bushes. 3 mangoes go between neighbours with clear ground between.
+ */
+export function spawnFeverLane(state: GameState, sv: Services, sim: SimCtx): void {
   const h = state.hero;
   const v = state.run.speed;
-  const x0 = Math.max(state.cam.x + state.view.viewW + 60, h.x + v * 0.9);
-  const end = h.x + v * 4.8;
+  const x0 = h.x + FEVER.laneStartU;
+  let xMax = h.x + v * (FEVER.duration - FEVER.laneEndS);
+  const horizon = h.x + GEN.aheadU - BUSH.w - FEVER.laneClearU;
+  if (xMax > horizon) xMax = horizon;
+  const out = sim.arcX;
+  const max = Math.min(FEVER.laneMax, out.length);
+  const step = FEVER.laneStepS * v;
+  const minStep = FEVER.laneMinStepS * v;
+  let n = planLane(state, x0, xMax, step, FEVER.laneClearU, out, max);
+  if (n < FEVER.laneMin) n = planLane(state, x0, xMax, minStep, FEVER.laneClearU, out, max);
+  if (n < FEVER.laneMin) n = planLane(state, x0, xMax, minStep, 0, out, max);
   let prev = -1;
-  for (let k = 0; k < 10; k++) {
-    const x = x0 + k * 0.45 * v;
-    if (x > end) break;
-    const e = laneBlocked(state, x - 0.2 * v, x + 0.2 * v) ? null : spawnEntity(state, sv, 'bush', x);
-    if (e === null) {
-      prev = -1;
-      continue;
-    }
+  for (let k = 0; k < n; k++) {
+    const x = out[k];
+    const e = spawnEntity(state, sv, 'bush', x);
+    if (e === null) break;
     e.lane = true;
-    if (prev >= 0) {
+    if (prev >= 0 && x - prev <= step * 1.25 && laneBlocker(state, prev + BUSH.w, x) < 0) {
       const gap = x - (prev + BUSH.w);
       for (let j = 1; j <= 3; j++) {
         const m = spawnEntity(state, sv, 'mango', prev + BUSH.w + (gap * j) / 4 - MANGO.size / 2);

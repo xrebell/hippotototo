@@ -53,8 +53,8 @@ export function rgbaHex(hex: string, a: number): string {
   return 'rgba(' + hexChannel(hex, 0) + ',' + hexChannel(hex, 1) + ',' + hexChannel(hex, 2) + ',' + a + ')';
 }
 
-/** One named colour per phase, derived from the phase definition. */
-type PhaseColorFn = (p: DayPhaseDef) => string;
+/** One named colour per phase, derived from the phase definition (and its index in PHASES). */
+export type PhaseColorFn = (p: DayPhaseDef, index: number) => string;
 
 /** Every phase-dependent colour the renderer uses (each array: 4 phases x 65 blend steps). */
 export interface PhaseTable {
@@ -78,12 +78,13 @@ export interface PhaseTable {
   haze: string[];
 }
 
-function buildChannel(fn: PhaseColorFn): string[] {
+/** One colour per table key (phase x blend step), cross-fading each phase into the next. Init only. */
+export function buildChannel(fn: PhaseColorFn): string[] {
   const n = PHASES.length;
   const out: string[] = [];
   for (let i = 0; i < n; i++) {
-    const a = fn(PHASES[i]);
-    const b = fn(PHASES[(i + 1) % n]);
+    const a = fn(PHASES[i], i);
+    const b = fn(PHASES[(i + 1) % n], (i + 1) % n);
     for (let k = 0; k <= PHASE_STEPS; k++) out.push(mixHex(a, b, k / PHASE_STEPS));
   }
   return out;

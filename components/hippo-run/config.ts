@@ -71,6 +71,13 @@ export const PHYS = {
    * the same step still gives the spec's ~74 u "tap" hop (spec: tap ~60 ms). Gameplay may tune.
    */
   jumpMinHold: 0.06,
+  /**
+   * Bush-aware minimum hold (s). When the default tap hop (cut at jumpMinHold) would come down on
+   * the next live thorn bush, a ground jump's cut is deferred (in DT steps, up to this long) to the
+   * first hold that clears it: an early quick tap behaves like a ~100-130 ms hold exactly when that
+   * is what clears the bush. Taps elsewhere keep the ~80 u hop; mounds still need a held jump.
+   */
+  tapAssistMax: 0.135,
   coyote: 0.09,
   jumpBuffer: 0.13,
   /** Smart buffer: press while falling with predicted time-to-ground <= this -> buffered jump. */
@@ -293,6 +300,22 @@ export const FEVER = {
   exitInvuln: 1.0,
   /** Natural fills (addGroove) cannot start TOTOTO TIME before this run time (s). */
   notBefore: 15,
+  /**
+   * Smash lane (world.spawnFeverLane). Starts this far (u) ahead of the hero: past the right edge
+   * of the widest view (VIEW.maxW * (1 - VIEW.heroXFrac) = 1014 u), so it never depends on viewW.
+   */
+  laneStartU: 1080,
+  /** Preferred spacing between lane bushes (s of travel). */
+  laneStepS: 0.45,
+  /** Minimum spacing when filling up to laneMin (s of travel). */
+  laneMinStepS: 0.3,
+  /** Last lane bush is reached at least this long (s) before the fever ends. */
+  laneEndS: 0.3,
+  /** Clear ground (u) kept between a lane bush and any course object. */
+  laneClearU: 24,
+  /** Guaranteed lane bushes per TOTOTO TIME / cap. */
+  laneMin: 4,
+  laneMax: 10,
 };
 
 export const NEAR_MISS = {
@@ -437,6 +460,9 @@ export const TUTORIAL = {
   /** HOLD prompt over the first mound on runs 1..holdRuns; mound death caption on runs 1..holdCaptionRuns. */
   holdRuns: 3,
   holdCaptionRuns: 5,
+  /** A grounded bush death this soon (sim s) after landing from a hop counts as "landed short":
+   *  the press was early, so runs 1..holdCaptionRuns get UI_TEXT.bushEarlyCaption. */
+  landedShortS: 0.25,
 };
 
 /* ================================================================== */
@@ -896,6 +922,8 @@ export const UI_TEXT = {
   tutDrum: 'JUMP ON THE DRUM',
   /** Game-over caption after a mound death on the first runs. */
   holdCaption: 'Hold longer to jump higher.',
+  /** Game-over caption after a bush death while falling from a hop, on the first runs. */
+  bushEarlyCaption: 'Tap a little later, or hold to jump farther.',
   fever: 'TOTOTO TIME!',
   close: 'CLOSE!',
   record: '+NEW RECORD',

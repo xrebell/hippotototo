@@ -31,6 +31,7 @@ import {
   MOUND,
   MULT_COLORS,
   NEVER,
+  PHYS,
   PICKUP,
   PIT,
   POOLS,
@@ -39,6 +40,7 @@ import {
   SPEED,
   GROOVE,
   HAPTIC,
+  TUTORIAL,
 } from './config';
 import type { Box, DeathCause, Entity, EntityKind, GameState, Services, TemplateId } from './types';
 import { chainBankValue, multiplierFor, speedAt } from './state';
@@ -130,6 +132,11 @@ export interface SimCtx {
   /* hero controller internals */
   /** Current flight may be cut by a release (ground / coyote / buffered jumps only). */
   cuttable: boolean;
+  /**
+   * Earliest rise time (s) at which a release may cut the current flight: PHYS.jumpMinHold, or
+   * longer when the default tap hop would land on the next thorn bush (hero.ts bush-aware hold).
+   */
+  cutAt: number;
   /** An ACTION press was consumed this sim step (teaching freeze release). */
   pressed: boolean;
   /** A ground / coyote / buffered jump launched this sim step (first-run assisted jump). */
@@ -148,6 +155,11 @@ export interface SimCtx {
   deathVX: number;
   deathLanded: boolean;
   deathSink: boolean;
+  /** The fatal hit came while falling in a hop/jump (came down on it), or within
+   *  TUTORIAL.landedShortS of landing from one (landed short of it): the press was early. */
+  deathFalling: boolean;
+  /** Sim s since the last non-slam landing (NEVER once > 1 s, or before the first one). */
+  hopLandT: number;
 
   /* pacing (REAL seconds; only affects timeScale, never the sim outcome) */
   nearSlowT: number;
@@ -218,6 +230,7 @@ export function createSimCtx(tm: HeroTimings): SimCtx {
     quiet: false,
     genEnabled: true,
     cuttable: false,
+    cutAt: PHYS.jumpMinHold,
     pressed: false,
     jumped: false,
     boingLaunch: false,
@@ -228,6 +241,8 @@ export function createSimCtx(tm: HeroTimings): SimCtx {
     deathVX: 0,
     deathLanded: false,
     deathSink: false,
+    deathFalling: false,
+    hopLandT: NEVER,
     nearSlowT: 0,
     freezeLevel: 0,
     freezeReal: 0,
@@ -283,6 +298,7 @@ export function createSimCtx(tm: HeroTimings): SimCtx {
 /** Reset every run-scoped field in place (pools are reset by state.resetRun). */
 export function resetSimCtx(sim: SimCtx): void {
   sim.cuttable = false;
+  sim.cutAt = PHYS.jumpMinHold;
   sim.pressed = false;
   sim.jumped = false;
   sim.boingLaunch = false;
@@ -293,6 +309,8 @@ export function resetSimCtx(sim: SimCtx): void {
   sim.deathVX = 0;
   sim.deathLanded = false;
   sim.deathSink = false;
+  sim.deathFalling = false;
+  sim.hopLandT = NEVER;
   sim.nearSlowT = 0;
   sim.freezeLevel = 0;
   sim.freezeReal = 0;
@@ -664,6 +682,7 @@ export function kill(state: GameState, sv: Services, sim: SimCtx, cause: DeathCa
   const h = state.hero;
   if (h.action === 'dead') return;
   state.deathCause = cause;
+  sim.deathFalling = (!h.grounded && h.action === 'air' && h.vy > 0) || (h.grounded && sim.hopLandT <= TUTORIAL.landedShortS);
   h.action = 'dead';
   h.grounded = false;
   h.deathT = 0;

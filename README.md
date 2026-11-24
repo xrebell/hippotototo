@@ -14,6 +14,16 @@ _Version 1.0.0 built with the Cruip CSS is available [here](https://github.com/c
 _Version 2.0.3 built with Tailwind CSS and React + Vite is available [here](https://github.com/cruip/open-react-template/releases/tag/2.0.3)._
 _Version 3.3.0 (before redesign) built with Tailwind CSS and Next.js is available [here](https://github.com/cruip/open-react-template/releases/tag/3.3.0)._
 
+## Hippo Tototo demo
+
+**Hippo Tototo: Stomp the Beat** is an original one-button endless runner bundled with this site: Toto, a heavy little hippo, runs a festival savanna, belly-slams onto drums that play the next note of the tune, and fills the Groove meter for TOTOTO TIME. Canvas + WebAudio only: no assets, no extra dependencies.
+
+- **Play:** `pnpm dev`, then open [`/play`](http://localhost:3000/play). A self-contained single-file build is `public/play.html` (served at `/play.html`, or open the file straight from disk).
+- **Controls:** one ACTION button: Space / ArrowUp / W / click / tap. Tap = hop, hold = higher jump; tap again in the air = SLAM; slam, then tap as you land = BOING. Land on drums to chain notes. ArrowDown / S = slam, P / Esc = pause, M = mute, R = restart.
+- **Build:** `pnpm build` (regenerates `public/play.html` first; `pnpm build:play` rebuilds only that file).
+- **Test:** `pnpm build && node scripts/playtest.mjs` runs the Playwright acceptance suite on both `/play` and `/play.html` (`--no-next` for the standalone file only, `--shots DIR` for screenshots). Debug: `?seed=N`, `?debug=1`, `window.__hippoRun`.
+- **Docs:** design spec and shipped tuning in [`docs/GAME_DESIGN.md`](docs/GAME_DESIGN.md); engine contracts in [`components/hippo-run/CONTRACTS.md`](components/hippo-run/CONTRACTS.md).
+
 ## Live demo
 
 Check the live demo here 👉️ [https://open.cruip.com/](https://open.cruip.com/)

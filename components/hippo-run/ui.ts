@@ -34,6 +34,8 @@
  *    beside him when there is no room above). SLAM / BOING anchored on Toto follow him.
  *  - TOTOTO TIME entry banner from fever.introT (pop 0 -> 1.3 -> 1, fade out by 1.25 s, white
  *    flash for 0.08 s; fade only in reduced motion); the chain counter hides for its first 0.6 s.
+ *    It sits at 22 % of the view height and moves above Toto when a high bounce would reach it; a
+ *    phase banner it would overlap (landscape) cross-fades out under it and back in as it fades.
  *  - Tall portrait (cssH / cssW > 1.3): pause panel + game-over card centred at 52 % of the height.
  *    The card never covers the top-right sound button. The rotate hint shows once per page load.
  */
@@ -333,9 +335,18 @@ export function createUI(opts: UiOptions): UiApi {
   let wTitleBestLbl = 0;
   let wStatM = 0;
   let wStatX = 0;
+  let wGoalDone = 0; // 'GOAL DONE' width (card label font, centred no-medal goal block)
   let wMultMax = 0;
   let wSub = 0;
   let feverLblW = 0;
+  /** TOTOTO TIME banner glyph extent above / below its centre at scale 1 (outline + shadow included). */
+  let feverBigUp = 0;
+  let feverBigDn = 0;
+  /** Highest (smallest) screen y Toto's sprite top reached during the current TOTOTO TIME intro. */
+  let fevTotoHi = 1e9;
+  let fevLastIt = 99;
+  /** Its top edge on the last drawn frame (1e9 when no intro is showing); the phase banner yields to it. */
+  let fevBannerTop = 1e9;
   const feverChars: string[] = [];
   const feverCharW: number[] = [];
   for (let i = 0; i < UI_TEXT.fever.length; i++) {
@@ -780,6 +791,14 @@ export function createUI(opts: UiOptions): UiApi {
     const fw100 = ctx.measureText(UI_TEXT.fever).width;
     feverBigSize = Math.min(80 * K, (vw * 0.86 * 100) / (1.3 * (fw100 + 15)));
     F_FEVER_BIG = fontPx(feverBigSize, '900');
+    // glyph extent about the 'middle' baseline, plus the 0.15 S outline and the 0.07 S drop shadow
+    ctx.font = F_FEVER_BIG;
+    ctx.textBaseline = 'middle';
+    const fm = ctx.measureText(UI_TEXT.fever);
+    const asc = fm.actualBoundingBoxAscent;
+    const desc = fm.actualBoundingBoxDescent;
+    feverBigUp = (asc > 0 ? asc : 0.42 * feverBigSize) + 0.075 * feverBigSize;
+    feverBigDn = (desc > 0 ? desc : 0.42 * feverBigSize) + 0.145 * feverBigSize;
     const fHalf = (fw100 * feverBigSize) / 200;
     feverBigGrad = ctx.createLinearGradient(-fHalf, 0, fHalf, 0);
     for (let i = 0; i < CHAIN_HUES.length; i++) feverBigGrad.addColorStop(i / (CHAIN_HUES.length - 1), CHAIN_HUES[i]);
@@ -808,6 +827,8 @@ export function createUI(opts: UiOptions): UiApi {
     ctx.font = F_CARD_LINE;
     wStatM = ctx.measureText(S_M).width;
     wStatX = ctx.measureText(S_X).width;
+    ctx.font = F_CARD_LABEL;
+    wGoalDone = ctx.measureText(S_GOAL_DONE).width;
     computePausePanel();
     keyVersion = -1;
     syncButtons(state);
@@ -1059,7 +1080,8 @@ export function createUI(opts: UiOptions): UiApi {
     }
     switch (sm.medal) {
       case 'none':
-        medalSub = 'Bronze at ' + fmtInt(MEDALS.bronze);
+        // shown under the centred goal block (no medal slot on the card)
+        medalSub = 'Bronze medal at ' + fmtInt(MEDALS.bronze);
         break;
       case 'bronze':
         medalSub = 'Silver at ' + fmtInt(MEDALS.silver);
@@ -1791,7 +1813,10 @@ export function createUI(opts: UiOptions): UiApi {
   /** TOTOTO TIME entry banner, from fever.introT (real s since the fever started). */
   function drawFeverIntro(ctx: CanvasRenderingContext2D, state: ReadState): void {
     const it = state.fever.introT;
-    if (!state.fever.active || !(it < 1.25)) return;
+    if (!state.fever.active || !(it < 1.25)) {
+      fevBannerTop = 1e9;
+      return;
+    }
     const reduced = state.save.reducedMotion;
     if (!reduced && it < 0.08) {
       ctx.globalAlpha = 0.5 * (1 - it / 0.08);
@@ -1804,11 +1829,12 @@ export function createUI(opts: UiOptions): UiApi {
     else if (it < 0.17) sc = 1.3 * easeOutCubic(it / 0.17);
     else if (it < 0.25) sc = 1.3 - (0.3 * (it - 0.17)) / 0.08;
     ctx.globalAlpha = clamp01(alpha);
+    const cy = feverIntroY(state, it, sc > 1 ? sc : 1, reduced);
     if (sc > 0.02) {
       const S = feverBigSize;
       const txt = UI_TEXT.fever;
       ctx.save();
-      ctx.translate(vw / 2, vh * 0.3);
+      ctx.translate(vw / 2, cy);
       ctx.scale(sc, sc);
       ctx.font = F_FEVER_BIG;
       ctx.textAlign = 'center';
@@ -1823,6 +1849,38 @@ export function createUI(opts: UiOptions): UiApi {
       ctx.restore();
     }
     ctx.globalAlpha = 1;
+  }
+
+  /**
+   * TOTOTO TIME banner centre y (logical): 22 % of the view height, kept clear of Toto. Toto's sprite
+   * band (feet = hero screen y, i.e. hero.y + view.offsetY; ~80 u above, ~22 u below, x his entry
+   * pop) never meets the banner band: the banner moves above the highest point he has reached this
+   * intro and stays there while he falls (no bobbing), staying fully on screen when it can. Only
+   * on the very tallest bounces does it ride above his head past the top edge. Above, never below:
+   * during the 1.25 s he always comes back down, so a spot under him would be crossed.
+   */
+  function feverIntroY(state: ReadState, it: number, sc: number, reduced: boolean): number {
+    if (it < fevLastIt) fevTotoHi = 1e9; // a new TOTOTO TIME started
+    fevLastIt = it;
+    const pop = !reduced && it < 0.3 ? 1.25 - (0.25 * it) / 0.3 : 1; // >= render's eased entry pop
+    const feet = heroScreenY(state);
+    const top = feet - 80 * pop;
+    const bot = feet + 22 * pop;
+    if (top < fevTotoHi) fevTotoHi = top;
+    const up = feverBigUp * sc;
+    const dn = feverBigDn * sc;
+    const gap = 6 * K;
+    let y = vh * 0.22;
+    // Toto was (or is) higher than the banner's bottom edge: sit above his highest point so far
+    if (fevTotoHi - gap - dn < y) {
+      y = fevTotoHi - gap - dn;
+      const minY = sT + 4 * K + up;
+      if (y < minY) y = minY;
+    }
+    // ...and never on him right now (the tallest bounces push it past the top edge for a moment)
+    if (top - gap - dn < y && bot + gap > y - up) y = top - gap - dn;
+    fevBannerTop = y - up;
+    return y;
   }
 
   function heroScreenY(state: ReadState): number {
@@ -2097,6 +2155,14 @@ export function createUI(opts: UiOptions): UiApi {
         alpha = 1 - q;
         sc = 1 - q * 0.15;
       }
+    }
+    // the TOTOTO TIME banner owns its moment: where the two would overlap (landscape), cross-fade out
+    // under its flash and back in as it fades
+    const fit = state.fever.introT;
+    if (state.fever.active && fit < 1.25) {
+      const fTop = Math.min(vh * 0.22 - feverBigUp * 1.3, fevBannerTop);
+      if (bannerY + 36 * K > fTop) alpha *= fit < 0.1 ? 1 - fit / 0.1 : fit > 1 ? (fit - 1) / 0.25 : 0;
+      if (alpha <= 0) return;
     }
     const w = bannerW + 52 * K;
     const h = 42 * K;
@@ -2518,14 +2584,15 @@ export function createUI(opts: UiOptions): UiApi {
     ctx.strokeStyle = 'rgba(165,180,252,0.2)';
     ctx.stroke();
 
-    /* medal + goal row */
+    /* medal + goal row (no medal: no empty slot, the goal block is centred across the card) */
+    const hasMedal = sm.medal !== 'none';
     const revealT = t - COUNT_START - UI.countUp - 0.05;
     const mA = reduced ? clamp01(revealT / 0.3) : 1;
     let mS = 1;
     if (!reduced) mS = revealT <= 0 ? 0 : easeOutElastic(revealT / 0.45);
     const medalCx = (pad + 28) * u;
     const medalCy = (y + 30) * u;
-    if (mS > 0 && mA > 0) {
+    if (hasMedal && mS > 0 && mA > 0) {
       ctx.save();
       ctx.globalAlpha = alpha * mA;
       ctx.translate(medalCx, medalCy);
@@ -2535,7 +2602,7 @@ export function createUI(opts: UiOptions): UiApi {
       ctx.restore();
     }
     const nameA = clamp01(revealT / 0.25);
-    if (nameA > 0) {
+    if (hasMedal && nameA > 0) {
       ctx.globalAlpha = alpha * nameA;
       const nameDx = reduced ? 0 : (1 - easeOutCubic(revealT / 0.3)) * -10 * u;
       ctx.textAlign = 'left';
@@ -2551,9 +2618,33 @@ export function createUI(opts: UiOptions): UiApi {
     }
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    // goal block (right half)
+    // goal block (right half beside the medal)
     const gx0 = (W / 2 + 18) * u;
-    if (sm.goalDone) {
+    if (!hasMedal) {
+      // three lines centred on the card (and evenly between the divider and the retry button):
+      // label, goal, then the next goal or the bronze target
+      const gcx = pw / 2;
+      ctx.font = F_CARD_LABEL;
+      if (sm.goalDone) {
+        const gl = gcx - (24 * u + wGoalDone) / 2;
+        iconCheck(ctx, gl + 9 * u, (y + 19) * u, 9 * u, COL.green);
+        ctx.fillStyle = COL.green;
+        ctx.fillText(S_GOAL_DONE, gl + 24 * u, (y + 19.5) * u);
+      }
+      ctx.textAlign = 'center';
+      if (!sm.goalDone) {
+        ctx.fillStyle = COL.gold;
+        ctx.fillText(S_NEXT_GOAL, gcx, (y + 19.5) * u);
+      }
+      ctx.font = F_GOAL;
+      ctx.fillStyle = COL.text;
+      ctx.fillText(goalLine0, gcx, (y + 39) * u);
+      ctx.font = F_MEDAL_SUB;
+      ctx.fillStyle = sm.goalDone ? COL.dim : COL.dimmer;
+      if (!sm.goalDone) ctx.globalAlpha = alpha * nameA; // fades in after the count-up, as a medal would
+      ctx.fillText(sm.goalDone ? goalLine1 : medalSub, gcx, (y + 58) * u);
+      ctx.globalAlpha = alpha;
+    } else if (sm.goalDone) {
       iconCheck(ctx, gx0 + 9 * u, (y + 16) * u, 9 * u, COL.green);
       ctx.font = F_CARD_LABEL;
       ctx.fillStyle = COL.green;

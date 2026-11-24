@@ -14,8 +14,12 @@
  *       "ground below" = no pit at the feet or at the predicted landing x, and no stompable top
  *       between the feet and the ground (falling onto a drum makes it a slam -> BOOM)
  *   4.  otherwise, once per airtime                            -> SLAM (0.05 s hang, then +1500)
- * Release: before PHYS.jumpMinHold of rise -> cut queued (tap hop ~83 u); after -> vy = max(vy, -420).
- * Only ground/coyote/buffered jumps are cuttable; bounces/boings/rescues never are.
+ * Release: before the flight's cut time (sim.cutAt) -> cut queued (tap hop ~80 u); after -> vy =
+ * max(vy, -420). Only ground/coyote/buffered jumps are cuttable; bounces/boings/rescues never are.
+ * Bush-aware hold: sim.cutAt is PHYS.jumpMinHold, unless that tap hop would come down on the next
+ * live thorn bush; then it is the first later cut (DT steps, <= PHYS.tapAssistMax) that clears it,
+ * so an early quick tap (up to ~0.30 s before contact at start speed) still clears ("any hop
+ * clears a bush"). Taps elsewhere and every mound keep the plain physics.
  *
  * Physics: semi-implicit Euler at DT = 1/120, gravity 2600 rising / 3500 falling, terminal 1500.
  * The SAME integrator (nextVy) drives stepHero, computeHeroTimings and simArc, so derived template
@@ -48,7 +52,9 @@ import {
   TOTO_ART,
   CHAIN_HUES,
 } from './config';
-import type { GameState, InputEvent, Services } from './types';
+import type { Box, Entity, GameState, InputEvent, Services } from './types';
+import { entityHitbox, makeBox } from './geom';
+import { speedAt } from './state';
 import type { HeroTimings, SimCtx, Traj } from './world-sim';
 import {
   addGroove,
@@ -288,6 +294,89 @@ function groundSoon(state: GameState): boolean {
   return true;
 }
 
+/* ------------------------------------------------------------------ */
+/* Bush-aware minimum hold                                             */
+/* ------------------------------------------------------------------ */
+
+/** Only bushes whose hitbox starts within this much travel time of the hurtbox front are checked. */
+const ASSIST_REACH_S = 0.5;
+/** Prediction margin (u) added around the bush hitbox: the chosen hop clears with room to spare. */
+const ASSIST_PAD = 1;
+/** Scratch hitbox for the prediction (carries nothing between calls). */
+const assistBox: Box = makeBox();
+
+/**
+ * Would a ground jump launched now, released early (cut on the first step whose rise time reaches
+ * cutAt), overlap hitbox `hb` (grown by `pad`) before the hurtbox has passed it? Steps exactly like
+ * stepHero -> stepWorld -> collideWorld: same integrator, same speed curve, same overlap rule.
+ */
+function hopHits(state: GameState, cutAt: number, hb: Box, pad: number): boolean {
+  const h = state.hero;
+  const half = HERO.hurtW / 2;
+  const x0 = hb.x - pad;
+  const x1 = hb.x + hb.w + pad;
+  const top = hb.y - pad;
+  let alt = GROUND_Y - h.y;
+  let vy = PHYS.jumpVy;
+  let airT = 0;
+  let cut = false;
+  let x = h.x;
+  let t = state.run.time;
+  for (let i = 0; i < 360; i++) {
+    airT += DT;
+    if (!cut && airT >= cutAt) {
+      cut = true;
+      if (vy < PHYS.jumpCutVy) vy = PHYS.jumpCutVy;
+    }
+    if (alt > 0 || vy < 0) {
+      vy = nextVy(vy, DT);
+      alt -= vy * DT;
+      if (alt <= 0 && vy > 0) {
+        alt = 0; // landed short: runs on along the ground
+        vy = 0;
+      }
+    }
+    t += DT;
+    x += speedAt(t) * DT;
+    if (x - half >= x1) return false;
+    if (x + half > x0 && GROUND_Y - alt - HERO.hurtBottom > top) return true;
+  }
+  return false;
+}
+
+/**
+ * Cut time for a ground jump launched now (see header): PHYS.jumpMinHold, or the shortest longer
+ * hold (<= PHYS.tapAssistMax) that clears the next live thorn bush when the plain tap hop would not.
+ * If no hold in range clears it, the plain tap hop is kept. Sim state only; runs at press time.
+ */
+function bushAwareCutAt(state: GameState): number {
+  const def = PHYS.jumpMinHold;
+  if (state.fever.active) return def;
+  const h = state.hero;
+  const back = h.x - HERO.hurtW / 2;
+  const reach = h.x + HERO.hurtW / 2 + state.run.speed * ASSIST_REACH_S;
+  const ents = state.entities;
+  let bush: Entity | null = null;
+  let bushX = 1e12;
+  for (let i = 0; i < ents.length; i++) {
+    const e = ents[i];
+    if (!e.active || e.kind !== 'bush' || e.flag !== 'none') continue;
+    entityHitbox(e, assistBox);
+    if (assistBox.x + assistBox.w <= back || assistBox.x >= reach || assistBox.x >= bushX) continue;
+    bush = e;
+    bushX = assistBox.x;
+  }
+  if (bush === null) return def;
+  entityHitbox(bush, assistBox);
+  if (!hopHits(state, def, assistBox, ASSIST_PAD)) return def;
+  for (let k = 1; k < 64; k++) {
+    const c = def + k * DT;
+    if (c > PHYS.tapAssistMax + 1e-9) break;
+    if (!hopHits(state, c, assistBox, ASSIST_PAD)) return c;
+  }
+  return def;
+}
+
 /** Common launch bookkeeping (jump, boing, bounce, rescue). */
 export function launchHero(state: GameState, sim: SimCtx, vy: number, cuttable: boolean): void {
   const h = state.hero;
@@ -303,12 +392,14 @@ export function launchHero(state: GameState, sim: SimCtx, vy: number, cuttable: 
   h.boingQueued = false;
   h.cutPending = false;
   sim.cuttable = cuttable;
+  sim.cutAt = PHYS.jumpMinHold;
   sim.boingLaunch = false;
 }
 
 function doJump(state: GameState, sv: Services, sim: SimCtx): void {
   const h = state.hero;
   launchHero(state, sim, PHYS.jumpVy, true);
+  sim.cutAt = bushAwareCutAt(state);
   sim.jumped = true;
   // A press already released (buffered tap) still gives the tap hop.
   h.cutPending = !h.held;
@@ -403,7 +494,7 @@ export function heroRelease(state: GameState, sim: SimCtx): void {
   const h = state.hero;
   h.held = false;
   if (!sim.cuttable || h.action !== 'air' || h.vy >= 0) return;
-  if (h.airT < PHYS.jumpMinHold) {
+  if (h.airT < sim.cutAt) {
     h.cutPending = true;
     return;
   }
@@ -480,6 +571,7 @@ function landOnGround(state: GameState, sv: Services, sim: SimCtx): void {
   }
   h.boingQueued = false;
   h.postSlamT = NEVER;
+  sim.hopLandT = 0;
   creditPitsCleared(state);
   let k = vy / JUICE.landDiv;
   if (k > JUICE.landMax) k = JUICE.landMax;
@@ -724,6 +816,10 @@ export function stepHero(state: GameState, sv: Services, sim: SimCtx, dt: number
     h.postSlamT += dt;
     if (h.postSlamT > 1) h.postSlamT = NEVER;
   }
+  if (sim.hopLandT < NEVER) {
+    sim.hopLandT += dt;
+    if (sim.hopLandT > 1) sim.hopLandT = NEVER;
+  }
   if (h.grounded) {
     const pit = pitIndexAt(state, h.x);
     if (pit >= 0) {
@@ -745,7 +841,7 @@ export function stepHero(state: GameState, sv: Services, sim: SimCtx, dt: number
       h.coyoteT += dt;
       if (h.coyoteT > 1) h.coyoteT = NEVER;
     }
-    if (h.cutPending && h.airT >= PHYS.jumpMinHold) {
+    if (h.cutPending && h.airT >= sim.cutAt) {
       h.cutPending = false;
       if (sim.cuttable && h.vy < PHYS.jumpCutVy) h.vy = PHYS.jumpCutVy;
       sim.cuttable = false;
