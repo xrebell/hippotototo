@@ -4,7 +4,9 @@
   "private": true,
   "scripts": {
     "dev": "next dev --turbopack",
+    "prebuild": "node scripts/build-standalone.mjs",
     "build": "next build",
+    "build:play": "node scripts/build-standalone.mjs",
     "start": "next start",
     "lint": "next lint"
   },
